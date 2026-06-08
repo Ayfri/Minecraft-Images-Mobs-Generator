@@ -82,6 +82,7 @@ data object AutoCapture {
 	private var mobY = 64.0
 	private var mobZ = 0.0
 	private var safeY = 64.0
+	private var savedFov = -1
 
 	private var currentMobEntityType: net.minecraft.world.entity.EntityType<*>? = null
 	private var currentMobRegName = ""
@@ -270,6 +271,20 @@ data object AutoCapture {
 
 	// ── Surface helpers ───────────────────────────────────────────────────────
 
+	// Returns a position near (centerX, centerZ) that is not under a tree canopy.
+	private fun findClearPos(mc: Minecraft, centerX: Double, centerZ: Double, radius: Int = 30): Pair<Double, Double> {
+		val level = mc.level ?: return centerX to centerZ
+		for (i in 0 until 25) {
+			val x = centerX + Random.nextInt(-radius, radius + 1)
+			val z = centerZ + Random.nextInt(-radius, radius + 1)
+			if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) continue
+			val blocking = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x.toInt(), z.toInt())
+			val noLeaves = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x.toInt(), z.toInt())
+			if (blocking <= noLeaves + 1) return x to z
+		}
+		return centerX to centerZ
+	}
+
 	private fun loadedSurfaceY(mc: Minecraft, x: Int, z: Int): Double? {
 		val level = mc.level ?: return null
 		if (!level.isLoaded(BlockPos(x, 0, z))) return null
@@ -289,16 +304,17 @@ data object AutoCapture {
 		val level = mc.level ?: return false
 		forceServerChunksAround(mc, x.toInt(), z.toInt(), radius = 1)
 		if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) return false
-		val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x.toInt(), z.toInt()).toDouble()
+		val (clearX, clearZ) = findClearPos(mc, x, z)
+		val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, clearX.toInt(), clearZ.toInt()).toDouble()
 		val sLevel = serverLevel(mc)
 		if (sLevel != null) {
-			spawnMobEntity(sLevel, x, y, z)
+			spawnMobEntity(sLevel, clearX, y, clearZ)
 		} else {
 			val conn = mc.player?.connection ?: return false
 			conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
-			conn.sendCommand("summon $currentMobRegName ${x.fmt()} ${y.fmt()} ${z.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}")
+			conn.sendCommand("summon $currentMobRegName ${clearX.fmt()} ${y.fmt()} ${clearZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}")
 		}
-		mobX = x; mobY = y; mobZ = z
+		mobX = clearX; mobY = y; mobZ = clearZ
 		nextRelocation = null
 		pendingMobSurfaceSnap = null
 		safeY = y
@@ -415,8 +431,9 @@ data object AutoCapture {
 		currentMobEntityType = mobType
 		currentMobRegName = BuiltInRegistries.ENTITY_TYPE.getKey(mobType).toString()
 		currentMobName = currentMobRegName.substringAfter(':')
-		mobX = baseX + Random.nextInt(-30, 30).toDouble()
-		mobZ = baseZ + Random.nextInt(-30, 30).toDouble()
+		val (clearMobX, clearMobZ) = findClearPos(mc, baseX.toDouble(), baseZ.toDouble())
+		mobX = clearMobX
+		mobZ = clearMobZ
 		mobY = loadedSurfaceY(mc, mobX.toInt(), mobZ.toInt()) ?: surfY
 
 		val sLevel = serverLevel(mc)
@@ -470,6 +487,8 @@ data object AutoCapture {
 		safeY = mc.player?.y ?: 64.0
 		DatasetCapture.autoMode = false
 		resetMobState()
+		savedFov = mc.options.fov().get()
+		mc.options.fov().set(70)
 
 		val wDesc = WeatherPhase.entries.joinToString(" ") { "${it.pct}%${it.label.first()}" }
 		mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAuto-capture started §8- §7/yolostop  /yoloclear"))
@@ -480,6 +499,9 @@ data object AutoCapture {
 	internal fun stop(mc: Minecraft) {
 		running = false; phase = Phase.IDLE
 		DatasetCapture.autoMode = true
+		if (savedFov != -1) {
+			mc.options.fov().set(savedFov); savedFov = -1
+		}
 		mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] §fStopped - $mobIndex mobs, $totalShots shots captured"))
 	}
 
