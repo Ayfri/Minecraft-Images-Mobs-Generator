@@ -276,8 +276,11 @@ data object AutoCapture {
 		return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z).toDouble()
 	}
 
+	// Uses MOTION_BLOCKING (includes leaves) so the camera sits above the canopy, not inside it.
 	private fun safeSurfaceY(mc: Minecraft, x: Int, z: Int): Double {
-		val y = loadedSurfaceY(mc, x, z) ?: return safeY
+		val level = mc.level ?: return safeY
+		if (!level.isLoaded(BlockPos(x, 0, z))) return safeY
+		val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z).toDouble()
 		return if (y < 60.0) safeY else y
 	}
 
@@ -397,7 +400,7 @@ data object AutoCapture {
 		val level = mc.level ?: return true
 		val eye = player.eyePosition
 		val target = Vec3(mobX, mobY + 1.0, mobZ)
-		val hit = level.clip(ClipContext(eye, target, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player))
+		val hit = level.clip(ClipContext(eye, target, ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, player))
 		return hit.type != HitResult.Type.BLOCK
 	}
 
