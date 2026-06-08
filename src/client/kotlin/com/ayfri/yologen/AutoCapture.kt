@@ -207,16 +207,20 @@ data object AutoCapture {
 	}
 
 	// Discards any tagged mob and spawns a fresh one at (x, y, z) - no /summon command or log.
-	private fun spawnMobEntity(sLevel: ServerLevel, x: Double, y: Double, z: Double) {
-		sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
-		val entity = currentMobEntityType?.create(sLevel, EntitySpawnReason.COMMAND) ?: return
-		entity.snapTo(x, y, z, 0f, 0f)
-		entity.isInvulnerable = true
-		entity.clearFire()
-		(entity as? Mob)?.isNoAi = true
-		(entity as? LivingEntity)?.addEffect(MobEffectInstance(MobEffects.FIRE_RESISTANCE, -1, 0, false, false, false))
-		entity.addTag(MOB_TAG)
-		sLevel.addFreshEntity(entity)
+	// Must run on the server thread (C2ME enforces thread-safe entity management).
+	private fun spawnMobEntity(mc: Minecraft, sLevel: ServerLevel, x: Double, y: Double, z: Double) {
+		val server = mc.singleplayerServer ?: return
+		server.execute {
+			sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
+			val entity = currentMobEntityType?.create(sLevel, EntitySpawnReason.COMMAND) ?: return@execute
+			entity.snapTo(x, y, z, 0f, 0f)
+			entity.isInvulnerable = true
+			entity.clearFire()
+			(entity as? Mob)?.isNoAi = true
+			(entity as? LivingEntity)?.addEffect(MobEffectInstance(MobEffects.FIRE_RESISTANCE, -1, 0, false, false, false))
+			entity.addTag(MOB_TAG)
+			sLevel.addFreshEntity(entity)
+		}
 	}
 
 	// ── Pool build ────────────────────────────────────────────────────────────
@@ -312,7 +316,7 @@ data object AutoCapture {
 		val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, clearX.toInt(), clearZ.toInt()).toDouble()
 		val sLevel = serverLevel(mc)
 		if (sLevel != null) {
-			spawnMobEntity(sLevel, clearX, y, clearZ)
+			spawnMobEntity(mc, sLevel, clearX, y, clearZ)
 		} else {
 			val conn = mc.player?.connection ?: return false
 			conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
@@ -447,7 +451,7 @@ data object AutoCapture {
 
 		val sLevel = serverLevel(mc)
 		if (sLevel != null) {
-			spawnMobEntity(sLevel, mobX, mobY, mobZ)
+			spawnMobEntity(mc, sLevel, mobX, mobY, mobZ)
 		} else {
 			mc.player?.connection?.sendCommand(
 				"summon $currentMobRegName ${mobX.fmt()} ${mobY.fmt()} ${mobZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"],active_effects:[{id:\"minecraft:fire_resistance\",duration:-1,amplifier:0,ambient:0b,show_particles:0b,show_icon:0b}]}"
@@ -542,8 +546,10 @@ data object AutoCapture {
 				if (setupTick == 0) {
 					val sLevel = serverLevel(mc)
 					if (sLevel != null) {
-						sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
-						sLevel.allEntities.filter { it !is ServerPlayer }.forEach { it.discard() }
+						mc.singleplayerServer!!.execute {
+							sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
+							sLevel.allEntities.filter { it !is ServerPlayer }.forEach { it.discard() }
+						}
 					} else {
 						conn.sendCommand("kill @e[type=!player]")
 					}
