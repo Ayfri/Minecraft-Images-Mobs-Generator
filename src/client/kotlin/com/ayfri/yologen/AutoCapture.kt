@@ -4,11 +4,17 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
 import net.minecraft.client.Minecraft
 import net.minecraft.core.BlockPos
 import net.minecraft.core.registries.BuiltInRegistries
+import net.minecraft.core.registries.Registries
 import net.minecraft.network.chat.Component
 import net.minecraft.resources.ResourceKey
 import net.minecraft.server.level.ServerLevel
+import net.minecraft.server.level.ServerPlayer
+import net.minecraft.world.clock.WorldClocks
+import net.minecraft.world.entity.EntitySpawnReason
 import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.entity.Mob
 import net.minecraft.world.level.ClipContext
+import net.minecraft.world.level.GameType
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.biome.Biome
 import net.minecraft.world.level.chunk.status.ChunkStatus
@@ -40,15 +46,17 @@ internal enum class WeatherPhase(val label: String, val fraction: Float) {
 }
 
 data object AutoCapture {
-	internal const val BIOME_SCAN_RADIUS = 1000
+	internal const val BIOME_SCAN_RADIUS = 2000
 	private const val BIOME_PREMAP_STEP = 64
 	private const val MOB_TAG = "yologen_mob"
 	internal const val MOB_SPAWN_TICK = 45
+	private const val PRELOAD_CHUNK_RADIUS = 2
 	private const val PRELOAD_HEIGHT = 200.0
 	internal const val RELOCATE_EVERY = 10
 	internal const val SETUP_WAIT_TICKS = 70
 	internal const val SHOTS_PER_MOB = 200
 	private const val TEMP_BUCKETS = 6
+	internal const val TERRAIN_POST_SNAP_TICKS = 15
 	internal const val TERRAIN_WAIT_TICKS = 30
 	internal const val TIER_SIZE = 25
 	internal const val TIME_PER_SHOT = 400L
@@ -75,6 +83,7 @@ data object AutoCapture {
 	private var mobZ = 0.0
 	private var safeY = 64.0
 
+	private var currentMobEntityType: net.minecraft.world.entity.EntityType<*>? = null
 	private var currentMobRegName = ""
 	private var lastRelocatedAtShot = -1
 	private var mobSpawned = false
@@ -86,7 +95,7 @@ data object AutoCapture {
 	private var targetPitch = 0f
 	private var targetYaw = 0f
 
-	// Incremental pool build — scans already-loaded chunks to avoid blocking chunk generation.
+	// Incremental pool build - scans already-loaded chunks to avoid blocking chunk generation.
 	private const val POOL_BUILD_BATCH = 20
 	private var poolBuildQueue = emptyList<PoolGridPos>()
 	private var poolBuildIndex = 0
@@ -116,16 +125,10 @@ data object AutoCapture {
 
 	internal fun weatherForShot(idx: Int) = WeatherPhase.forShot(idx, SHOTS_PER_MOB).label
 
-	private fun loadedSurfaceY(mc: Minecraft, x: Int, z: Int): Double? {
-		val level = mc.level ?: return null
-		if (!level.isLoaded(BlockPos(x, 0, z))) return null
-		return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z).toDouble()
-	}
+	// ── Direct server-side helpers ────────────────────────────────────────────
 
-	private fun safeSurfaceY(mc: Minecraft, x: Int, z: Int): Double {
-		val y = loadedSurfaceY(mc, x, z) ?: return safeY
-		return if (y < 60.0) safeY else y
-	}
+	private fun serverPlayer(mc: Minecraft): ServerPlayer? =
+		mc.singleplayerServer?.playerList?.players?.firstOrNull()
 
 	private fun serverLevel(mc: Minecraft): ServerLevel? {
 		val server = mc.singleplayerServer ?: return null
@@ -133,35 +136,69 @@ data object AutoCapture {
 		return server.getLevel(dimension)
 	}
 
-	private fun forceServerChunk(mc: Minecraft, x: Int, z: Int) {
-		serverLevel(mc)?.chunkSource?.getChunk(x.toChunkCoord(), z.toChunkCoord(), ChunkStatus.FULL, true)
+	// Forces server chunks in a square radius around (x, z).
+	private fun forceServerChunksAround(mc: Minecraft, x: Int, z: Int, radius: Int = PRELOAD_CHUNK_RADIUS) {
+		val sLevel = serverLevel(mc) ?: return
+		val cx = x.toChunkCoord()
+		val cz = z.toChunkCoord()
+		for (dx in -radius..radius)
+			for (dz in -radius..radius)
+				sLevel.chunkSource.getChunk(cx + dx, cz + dz, ChunkStatus.FULL, true)
+	}
+
+	// Sets day-time via ServerClockManager - the new 26.1 time system.
+	private fun applyInstantTime(mc: Minecraft, time: Long) {
+		val server = mc.singleplayerServer
+		if (server != null) {
+			val clockManager = server.clockManager()
+			val clockHolder = server.registryAccess()
+				.lookupOrThrow(Registries.WORLD_CLOCK)
+				.getOrThrow(WorldClocks.OVERWORLD)
+			val current = clockManager.getTotalTicks(clockHolder)
+			val aligned = (current / 24000L) * 24000L + time
+			clockManager.setTotalTicks(clockHolder, aligned)
+			return
+		}
+		mc.player?.connection?.sendCommand("time set $time")
 	}
 
 	private fun applyInstantWeather(mc: Minecraft, weather: String) {
 		val server = mc.singleplayerServer
-		if (server == null) {
-			mc.player?.connection?.sendCommand("weather $weather")
+		if (server != null) {
+			when (weather) {
+				"rain" -> server.setWeatherParameters(0, 24000, true, false)
+				"thunder" -> server.setWeatherParameters(0, 24000, true, true)
+				else -> server.setWeatherParameters(24000, 0, false, false)
+			}
 			return
 		}
-
-		when (weather) {
-			"rain" -> server.setWeatherParameters(0, 24000, true, false)
-			"thunder" -> server.setWeatherParameters(0, 24000, true, true)
-			else -> server.setWeatherParameters(24000, 0, false, false)
-		}
+		mc.player?.connection?.sendCommand("weather $weather")
 	}
 
-	private fun applyInstantTime(mc: Minecraft, time: Long) {
-		mc.player?.connection?.sendCommand("time set $time")
+	// Teleports the server-side player (preserves rotation, produces no log).
+	private fun teleportPlayer(mc: Minecraft, x: Double, y: Double, z: Double) {
+		serverPlayer(mc)?.teleportTo(x, y, z)
+			?: mc.player?.connection?.sendCommand("tp @s ${x.fmt()} ${y.fmt()} ${z.fmt()}")
 	}
 
-	private fun fallbackRelocation() =
-		(baseX + Random.nextInt(-20, 20)).toDouble() to (baseZ + Random.nextInt(-20, 20)).toDouble()
-
+	// Teleports player to PRELOAD_HEIGHT above target and forces surrounding chunks.
 	private fun preloadPosition(mc: Minecraft, x: Double, z: Double) {
-		forceServerChunk(mc, x.toInt(), z.toInt())
-		mc.player?.connection?.sendCommand("tp @s ${x.fmt()} ${PRELOAD_HEIGHT.fmt()} ${z.fmt()}")
+		forceServerChunksAround(mc, x.toInt(), z.toInt())
+		teleportPlayer(mc, x, PRELOAD_HEIGHT, z)
 	}
+
+	// Discards any tagged mob and spawns a fresh one at (x, y, z) - no /summon command or log.
+	private fun spawnMobEntity(sLevel: ServerLevel, x: Double, y: Double, z: Double) {
+		sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
+		val entity = currentMobEntityType?.create(sLevel, EntitySpawnReason.COMMAND) ?: return
+		entity.snapTo(x, y, z, 0f, 0f)
+		entity.isInvulnerable = true
+		(entity as? Mob)?.isNoAi = true
+		entity.addTag(MOB_TAG)
+		sLevel.addFreshEntity(entity)
+	}
+
+	// ── Pool build ────────────────────────────────────────────────────────────
 
 	private fun startPoolBuild() {
 		poolBiomeMap = mutableMapOf()
@@ -180,7 +217,7 @@ data object AutoCapture {
 		poolBuildDone = false
 	}
 
-	// Called every tick during session — only reads already-loaded chunks, never forces generation.
+	// Called every tick - only reads already-loaded chunks, never forces generation.
 	private fun advancePoolBuild(mc: Minecraft) {
 		if (poolBuildDone) return
 		val level = serverLevel(mc) ?: run { poolBuildDone = true; return }
@@ -190,19 +227,18 @@ data object AutoCapture {
 			val pos = poolBuildQueue[poolBuildIndex]
 			if (level.chunkSource.hasChunk(pos.worldX.toChunkCoord(), pos.worldZ.toChunkCoord())) {
 				val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, pos.worldX, pos.worldZ)
-				val biome = level.getBiome(BlockPos(pos.worldX, y, pos.worldZ)).unwrapKey().orElse(null)
-				if (biome != null) {
-					val biomeHolder = level.getBiome(BlockPos(pos.worldX, y, pos.worldZ))
+				val biomeHolder = level.getBiome(BlockPos(pos.worldX, y, pos.worldZ))
+				val biomeKey = biomeHolder.unwrapKey().orElse(null)
+				if (biomeKey != null) {
 					val bucket = tempBucket(biomeHolder.value().baseTemperature)
 					val dx = (pos.worldX - baseX).toDouble()
 					val dz = (pos.worldZ - baseZ).toDouble()
 					val dist2 = dx * dx + dz * dz
-					val existing = poolBiomeMap[biome]
-					val existingDist2 = existing?.let {
-						(it.x - baseX).pow(2) + (it.z - baseZ).pow(2)
-					} ?: -1.0
-					if (dist2 > existingDist2) poolBiomeMap[biome] =
-						BiomeRelocation(biome, pos.worldX.toDouble(), pos.worldZ.toDouble(), bucket)
+					val existing = poolBiomeMap[biomeKey]
+					val existingDist2 = existing?.let { (it.x - baseX).pow(2) + (it.z - baseZ).pow(2) } ?: -1.0
+					if (dist2 > existingDist2)
+						poolBiomeMap[biomeKey] =
+							BiomeRelocation(biomeKey, pos.worldX.toDouble(), pos.worldZ.toDouble(), bucket)
 				}
 			}
 			poolBuildIndex++
@@ -216,15 +252,33 @@ data object AutoCapture {
 		}
 	}
 
+	// ── Surface helpers ───────────────────────────────────────────────────────
+
+	private fun loadedSurfaceY(mc: Minecraft, x: Int, z: Int): Double? {
+		val level = mc.level ?: return null
+		if (!level.isLoaded(BlockPos(x, 0, z))) return null
+		return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z).toDouble()
+	}
+
+	private fun safeSurfaceY(mc: Minecraft, x: Int, z: Int): Double {
+		val y = loadedSurfaceY(mc, x, z) ?: return safeY
+		return if (y < 60.0) safeY else y
+	}
+
+	// Snaps the mob to the loaded client surface. Returns false if chunk not ready yet.
 	private fun snapMobToLoadedSurface(mc: Minecraft, x: Double, z: Double): Boolean {
 		val level = mc.level ?: return false
-		forceServerChunk(mc, x.toInt(), z.toInt())
+		forceServerChunksAround(mc, x.toInt(), z.toInt(), radius = 1)
 		if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) return false
 		val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x.toInt(), z.toInt()).toDouble()
-		val conn = mc.player?.connection ?: return false
-		// TP to void first to skip death animation/particles, then re-summon.
-		conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
-		conn.sendCommand("summon $currentMobRegName ${x.fmt()} ${y.fmt()} ${z.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}")
+		val sLevel = serverLevel(mc)
+		if (sLevel != null) {
+			spawnMobEntity(sLevel, x, y, z)
+		} else {
+			val conn = mc.player?.connection ?: return false
+			conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
+			conn.sendCommand("summon $currentMobRegName ${x.fmt()} ${y.fmt()} ${z.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}")
+		}
 		mobX = x; mobY = y; mobZ = z
 		nextRelocation = null
 		pendingMobSurfaceSnap = null
@@ -232,47 +286,15 @@ data object AutoCapture {
 		return true
 	}
 
-	// Tier-based orbit: 4×25 shots spanning 360° with even spacing + jitter per tier.
-	// Tier 0: close-ground  Tier 1: medium-mid  Tier 2: far-high  Tier 3: top-down
-	private fun orbitParams(shotIdx: Int): Triple<Double, Double, Double> {
-		val tier = shotIdx / TIER_SIZE
-		val baseAngle = (shotIdx % TIER_SIZE).toDouble() / TIER_SIZE * 2 * PI
-		val angle = baseAngle + Random.nextDouble(-PI / TIER_SIZE, PI / TIER_SIZE)
-		return when (tier) {
-			0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))
-			1 -> Triple(angle, Random.nextDouble(5.0, 9.0), Random.nextDouble(1.2, 4.0))
-			2 -> Triple(angle, Random.nextDouble(8.0, 14.0), Random.nextDouble(3.5, 8.0))
-			else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0))
-		}
-	}
+	// ── Biome relocation ──────────────────────────────────────────────────────
 
-	// Overrides interpolation and mouse input by setting both current and previous rotation.
-	private fun applyRotation(mc: Minecraft) {
-		val p = mc.player ?: return
-		p.yRot = targetYaw; p.yRotO = targetYaw; p.setYHeadRot(targetYaw); p.setYBodyRot(targetYaw)
-		p.xRot = targetPitch; p.xRotO = targetPitch
-	}
+	private fun fallbackRelocation() =
+		(baseX + Random.nextInt(-20, 20)).toDouble() to (baseZ + Random.nextInt(-20, 20)).toDouble()
 
-	// Recomputes yaw/pitch toward the mob from the player's actual current position, then applies.
-	// Use in subTick 1+ so the teleport has (partially) resolved before we lock the angle.
-	private fun recomputeAndApplyRotation(mc: Minecraft) {
-		val p = mc.player ?: return
-		val dx = mobX - p.x
-		val dy = (mobY + 1.0) - p.eyeY
-		val dz = mobZ - p.z
-		val h = sqrt(dx * dx + dz * dz)
-		if (h < 0.01 && abs(dy) < 0.01) return   // degenerate case: on top of mob
-		targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
-		targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat()
-		applyRotation(mc)
-	}
-
-	// Lightweight fallback: picks a random far position at a different biome via sparse sampling.
 	private fun findNewBiomePosition(mc: Minecraft): Pair<Int, Int>? {
 		val level = mc.level ?: return null
 		val currentKey =
 			level.getBiome(BlockPos(mobX.toInt(), mobY.toInt(), mobZ.toInt())).unwrapKey().orElse(null) ?: return null
-
 		repeat(32) {
 			val x = baseX + Random.nextInt(-BIOME_SCAN_RADIUS, BIOME_SCAN_RADIUS + 1)
 			val z = baseZ + Random.nextInt(-BIOME_SCAN_RADIUS, BIOME_SCAN_RADIUS + 1)
@@ -288,7 +310,7 @@ data object AutoCapture {
 		val currentBucket = currentBiomeHolder?.value()?.baseTemperature?.let { tempBucket(it) } ?: -1
 
 		if (relocationPool.isNotEmpty()) {
-			// Try buckets from targetBucket onward, skipping the current climate zone
+			// Cycle through climate buckets, always skipping the current zone
 			for (offset in 0 until TEMP_BUCKETS) {
 				val bucket = (targetBucket + offset) % TEMP_BUCKETS
 				if (bucket == currentBucket) continue
@@ -300,7 +322,6 @@ data object AutoCapture {
 					return pick.x to pick.z
 				}
 			}
-			// Fallback: any different biome (same climate zone acceptable)
 			val anyOther = relocationPool.filter { it.biome != currentKey }
 			if (anyOther.isNotEmpty()) {
 				val pick = anyOther[relocationCursor % anyOther.size]
@@ -308,11 +329,43 @@ data object AutoCapture {
 				return pick.x to pick.z
 			}
 		}
-
 		return findNewBiomePosition(mc)?.let { (x, z) -> x.toDouble() to z.toDouble() } ?: fallbackRelocation()
 	}
 
-	// Latches onto the nearest living entity within 30 blocks to track gravity/movement.
+	// ── Orbit + rotation ──────────────────────────────────────────────────────
+
+	// Tier-based orbit: 4×50 shots spanning 360° with even spacing + jitter per tier.
+	// Tier 0: close-ground  Tier 1: medium-mid  Tier 2: far-high  Tier 3: top-down
+	private fun orbitParams(shotIdx: Int): Triple<Double, Double, Double> {
+		val tier = shotIdx / TIER_SIZE
+		val baseAngle = (shotIdx % TIER_SIZE).toDouble() / TIER_SIZE * 2 * PI
+		val angle = baseAngle + Random.nextDouble(-PI / TIER_SIZE, PI / TIER_SIZE)
+		return when (tier) {
+			0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))
+			1 -> Triple(angle, Random.nextDouble(5.0, 9.0), Random.nextDouble(1.2, 4.0))
+			2 -> Triple(angle, Random.nextDouble(8.0, 14.0), Random.nextDouble(3.5, 8.0))
+			else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0))
+		}
+	}
+
+	private fun applyRotation(mc: Minecraft) {
+		val p = mc.player ?: return
+		p.yRot = targetYaw; p.yRotO = targetYaw; p.setYHeadRot(targetYaw); p.setYBodyRot(targetYaw)
+		p.xRot = targetPitch; p.xRotO = targetPitch
+	}
+
+	private fun recomputeAndApplyRotation(mc: Minecraft) {
+		val p = mc.player ?: return
+		val dx = mobX - p.x
+		val dy = (mobY + 1.0) - p.eyeY
+		val dz = mobZ - p.z
+		val h = sqrt(dx * dx + dz * dz)
+		if (h < 0.01 && abs(dy) < 0.01) return
+		targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
+		targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat()
+		applyRotation(mc)
+	}
+
 	private fun updateMobPosition(mc: Minecraft) {
 		val entities =
 			mc.level?.entitiesForRendering()?.filterIsInstance<LivingEntity>()?.filter { it != mc.player } ?: return
@@ -323,26 +376,6 @@ data object AutoCapture {
 		}
 	}
 
-	private fun spawnMobOnLoadedSurface(mc: Minecraft): Boolean {
-		val conn = mc.player?.connection ?: return false
-		val surfY = loadedSurfaceY(mc, baseX, baseZ) ?: return false
-		safeY = surfY
-		conn.sendCommand("tp @s ${baseX.toDouble().fmt()} ${surfY.fmt()} ${baseZ.toDouble().fmt()}")
-
-		val regName = BuiltInRegistries.ENTITY_TYPE.getKey(mobTypes.random()).toString()
-		currentMobRegName = regName
-		currentMobName = regName.substringAfter(':')
-		mobX = baseX + Random.nextInt(-30, 30).toDouble()
-		mobZ = baseZ + Random.nextInt(-30, 30).toDouble()
-		mobY = loadedSurfaceY(mc, mobX.toInt(), mobZ.toInt()) ?: surfY
-		conn.sendCommand("summon $regName ${mobX.fmt()} ${mobY.fmt()} ${mobZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}")
-		pendingMobSurfaceSnap = mobX to mobZ
-		mobSpawned = true
-		shotCount = 0; subTick = 0
-		return true
-	}
-
-	// Raycasts from the camera eye to mob center; returns false if a solid block is in the way.
 	private fun isVisible(mc: Minecraft): Boolean {
 		val player = mc.player ?: return true
 		val level = mc.level ?: return true
@@ -351,6 +384,37 @@ data object AutoCapture {
 		val hit = level.clip(ClipContext(eye, target, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player))
 		return hit.type != HitResult.Type.BLOCK
 	}
+
+	// ── Mob spawn ─────────────────────────────────────────────────────────────
+
+	private fun spawnMobOnLoadedSurface(mc: Minecraft): Boolean {
+		val surfY = loadedSurfaceY(mc, baseX, baseZ) ?: return false
+		safeY = surfY
+		teleportPlayer(mc, baseX.toDouble(), surfY, baseZ.toDouble())
+
+		val mobType = mobTypes.random()
+		currentMobEntityType = mobType
+		currentMobRegName = BuiltInRegistries.ENTITY_TYPE.getKey(mobType).toString()
+		currentMobName = currentMobRegName.substringAfter(':')
+		mobX = baseX + Random.nextInt(-30, 30).toDouble()
+		mobZ = baseZ + Random.nextInt(-30, 30).toDouble()
+		mobY = loadedSurfaceY(mc, mobX.toInt(), mobZ.toInt()) ?: surfY
+
+		val sLevel = serverLevel(mc)
+		if (sLevel != null) {
+			spawnMobEntity(sLevel, mobX, mobY, mobZ)
+		} else {
+			mc.player?.connection?.sendCommand(
+				"summon $currentMobRegName ${mobX.fmt()} ${mobY.fmt()} ${mobZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}"
+			)
+		}
+		pendingMobSurfaceSnap = mobX to mobZ
+		mobSpawned = true
+		shotCount = 0; subTick = 0
+		return true
+	}
+
+	// ── Lifecycle ─────────────────────────────────────────────────────────────
 
 	fun register() {
 		ClientTickEvents.END_CLIENT_TICK.register { mc ->
@@ -368,6 +432,7 @@ data object AutoCapture {
 		pendingMobSurfaceSnap = null
 		relocationCursor = 0
 		targetBucket = 0
+		currentMobEntityType = null
 	}
 
 	private fun resetMobState() {
@@ -398,6 +463,8 @@ data object AutoCapture {
 		mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] §fStopped - $mobIndex mobs, $totalShots shots captured"))
 	}
 
+	// ── Main tick ─────────────────────────────────────────────────────────────
+
 	private fun tick(mc: Minecraft) {
 		val player = mc.player ?: return
 		val conn = player.connection
@@ -422,9 +489,16 @@ data object AutoCapture {
 
 			Phase.SETUP -> {
 				if (setupTick == 0) {
-					conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
-					conn.sendCommand("kill @e[type=!player,distance=..200]")
-					conn.sendCommand("gamemode spectator")
+					val sLevel = serverLevel(mc)
+					if (sLevel != null) {
+						sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
+						sLevel.allEntities.filter { it !is ServerPlayer }.forEach { it.discard() }
+					} else {
+						conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
+						conn.sendCommand("kill @e[type=!player,distance=..200]")
+					}
+					serverPlayer(mc)?.gameMode?.changeGameModeForPlayer(GameType.SPECTATOR)
+						?: conn.sendCommand("gamemode spectator")
 					baseTime = Random.nextLong(0, 24000)
 					baseX = Random.nextInt(-500, 500)
 					baseZ = Random.nextInt(-500, 500)
@@ -451,17 +525,17 @@ data object AutoCapture {
 			Phase.CAPTURING -> {
 				pendingMobSurfaceSnap?.let { (x, z) ->
 					if (!snapMobToLoadedSurface(mc, x, z)) return
-					terrainWaitTick = 1
+					terrainWaitTick = TERRAIN_POST_SNAP_TICKS
 					return
 				}
 
-				// Wait for terrain to load after mob relocation before computing orbit.
+				// Wait after mob snap so chunk meshes finish building before orbit shots.
 				if (terrainWaitTick > 0) {
 					terrainWaitTick--
 					if (terrainWaitTick > 0) return
 				}
 
-				// Defensively re-lock rotation every tick in case a server packet reset it.
+				// Re-lock rotation every tick - guards against server packet resets.
 				if (subTick > 0) applyRotation(mc)
 
 				when (subTick) {
@@ -486,7 +560,7 @@ data object AutoCapture {
 						if ((shotCount + 1) % RELOCATE_EVERY == 0 && nextRelocation == null) {
 							nextRelocation = chooseRelocation(mc)
 							val (preloadX, preloadZ) = nextRelocation!!
-							forceServerChunk(mc, preloadX.toInt(), preloadZ.toInt())
+							forceServerChunksAround(mc, preloadX.toInt(), preloadZ.toInt())
 						}
 
 						val (angle, dist, heightOffset) = orbitParams(shotCount)
@@ -499,7 +573,7 @@ data object AutoCapture {
 						val h = sqrt(dx * dx + dz * dz)
 						targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
 						targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat()
-						conn.sendCommand("tp @s ${px.fmt()} ${py.fmt()} ${pz.fmt()}")
+						teleportPlayer(mc, px, py, pz)
 						applyRotation(mc); subTick = 1
 					}
 
@@ -509,7 +583,6 @@ data object AutoCapture {
 
 					2 -> {
 						recomputeAndApplyRotation(mc)
-						// Only capture if no solid block occludes the mob.
 						if (isVisible(mc)) {
 							DatasetCapture.pendingCaptureMetadata = CaptureMetadata(
 								mobName = currentMobName, mobX = mobX, mobY = mobY, mobZ = mobZ,
