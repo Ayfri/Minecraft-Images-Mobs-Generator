@@ -102,6 +102,9 @@ data object AutoCapture {
 	private var poolBiomeMap = mutableMapOf<ResourceKey<Biome>, BiomeRelocation>()
 	private var poolBuildDone = false
 
+	// Background pool preloader — warms up server chunks for all relocation destinations.
+	private var poolPreloadIdx = 0
+
 	private data class PoolGridPos(val worldX: Int, val worldZ: Int)
 
 	internal enum class Phase { IDLE, SETUP, CAPTURING }
@@ -136,14 +139,27 @@ data object AutoCapture {
 		return server.getLevel(dimension)
 	}
 
-	// Forces server chunks in a square radius around (x, z).
+	// Forces server chunks asynchronously — posts to server thread to avoid client-tick freeze.
 	private fun forceServerChunksAround(mc: Minecraft, x: Int, z: Int, radius: Int = PRELOAD_CHUNK_RADIUS) {
-		val sLevel = serverLevel(mc) ?: return
+		val server = mc.singleplayerServer ?: return
+		val dimension = mc.level?.dimension() ?: Level.OVERWORLD
 		val cx = x.toChunkCoord()
 		val cz = z.toChunkCoord()
-		for (dx in -radius..radius)
-			for (dz in -radius..radius)
-				sLevel.chunkSource.getChunk(cx + dx, cz + dz, ChunkStatus.FULL, true)
+		server.execute {
+			val sLevel = server.getLevel(dimension) ?: return@execute
+			for (dx in -radius..radius)
+				for (dz in -radius..radius)
+					sLevel.chunkSource.getChunk(cx + dx, cz + dz, ChunkStatus.FULL, true)
+		}
+	}
+
+	// Warms up server chunks for the next unvisited pool entry — 1 per tick, radius=1.
+	private fun advancePoolPreload(mc: Minecraft) {
+		if (!poolBuildDone || relocationPool.isEmpty()) return
+		if (poolPreloadIdx < relocationPool.size) {
+			val entry = relocationPool[poolPreloadIdx++]
+			forceServerChunksAround(mc, entry.x.toInt(), entry.z.toInt(), radius = 1)
+		}
 	}
 
 	// Sets day-time via ServerClockManager - the new 26.1 time system.
@@ -442,6 +458,7 @@ data object AutoCapture {
 		poolBuildIndex = 0
 		poolBiomeMap.clear()
 		poolBuildDone = false
+		poolPreloadIdx = 0
 	}
 
 	internal fun start(mc: Minecraft) {
@@ -542,6 +559,7 @@ data object AutoCapture {
 					0 -> {
 						updateMobPosition(mc)
 						advancePoolBuild(mc)
+						advancePoolPreload(mc)
 
 						if (shotCount > 0 && shotCount % RELOCATE_EVERY == 0 && lastRelocatedAtShot != shotCount) {
 							lastRelocatedAtShot = shotCount
