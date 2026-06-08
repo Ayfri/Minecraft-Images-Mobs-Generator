@@ -3,5 +3,7 @@ package com.ayfri.yologen
 import net.fabricmc.api.ClientModInitializer
 
 object YoloGenClient : ClientModInitializer {
-	override fun onInitializeClient() {}
+    override fun onInitializeClient() {
+        DatasetCapture.register()
+    }
 }
