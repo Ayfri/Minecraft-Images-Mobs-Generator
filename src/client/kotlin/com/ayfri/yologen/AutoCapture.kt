@@ -95,6 +95,7 @@ data object AutoCapture {
 	private var nextRelocation: Pair<Double, Double>? = null
 	private var pendingMobSurfaceSnap: Pair<Double, Double>? = null
 	private var relocationCursor = 0
+	@Volatile
 	private var relocationPool = emptyList<BiomeRelocation>()
 	private var targetBucket = 0
 	private var targetPitch = 0f
@@ -105,6 +106,7 @@ data object AutoCapture {
 	private var poolBuildQueue = emptyList<PoolGridPos>()
 	private var poolBuildIndex = 0
 	private var poolBiomeMap = mutableMapOf<ResourceKey<Biome>, BiomeRelocation>()
+	@Volatile
 	private var poolBuildDone = false
 
 	// Background pool preloader - warms up server chunks for all relocation destinations.
@@ -141,12 +143,6 @@ data object AutoCapture {
 	private fun serverPlayer(mc: Minecraft): ServerPlayer? =
 		mc.singleplayerServer?.playerList?.players?.firstOrNull()
 
-	private fun serverLevel(mc: Minecraft): ServerLevel? {
-		val server = mc.singleplayerServer ?: return null
-		val dimension = mc.level?.dimension() ?: Level.OVERWORLD
-		return server.getLevel(dimension)
-	}
-
 	// Forces server chunks asynchronously - posts to server thread to avoid client-tick freeze.
 	private fun forceServerChunksAround(mc: Minecraft, x: Int, z: Int, radius: Int = PRELOAD_CHUNK_RADIUS) {
 		val server = mc.singleplayerServer ?: return
@@ -174,13 +170,15 @@ data object AutoCapture {
 	private fun applyInstantTime(mc: Minecraft, time: Long) {
 		val server = mc.singleplayerServer
 		if (server != null) {
-			val clockManager = server.clockManager()
-			val clockHolder = server.registryAccess()
-				.lookupOrThrow(Registries.WORLD_CLOCK)
-				.getOrThrow(WorldClocks.OVERWORLD)
-			val current = clockManager.getTotalTicks(clockHolder)
-			val aligned = (current / 24000L) * 24000L + time
-			clockManager.setTotalTicks(clockHolder, aligned)
+			server.execute {
+				val clockManager = server.clockManager()
+				val clockHolder = server.registryAccess()
+					.lookupOrThrow(Registries.WORLD_CLOCK)
+					.getOrThrow(WorldClocks.OVERWORLD)
+				val current = clockManager.getTotalTicks(clockHolder)
+				val aligned = (current / 24000L) * 24000L + time
+				clockManager.setTotalTicks(clockHolder, aligned)
+			}
 			return
 		}
 		mc.player?.connection?.sendCommand("time set $time")
@@ -189,10 +187,12 @@ data object AutoCapture {
 	private fun applyInstantWeather(mc: Minecraft, weather: String) {
 		val server = mc.singleplayerServer
 		if (server != null) {
-			when (weather) {
-				"rain" -> server.setWeatherParameters(0, 24000, true, false)
-				"thunder" -> server.setWeatherParameters(0, 24000, true, true)
-				else -> server.setWeatherParameters(24000, 0, false, false)
+			server.execute {
+				when (weather) {
+					"rain" -> server.setWeatherParameters(0, 24000, true, false)
+					"thunder" -> server.setWeatherParameters(0, 24000, true, true)
+					else -> server.setWeatherParameters(24000, 0, false, false)
+				}
 			}
 			return
 		}
@@ -201,8 +201,14 @@ data object AutoCapture {
 
 	// Teleports the server-side player (preserves rotation, produces no log).
 	private fun teleportPlayer(mc: Minecraft, x: Double, y: Double, z: Double) {
-		serverPlayer(mc)?.teleportTo(x, y, z)
-			?: mc.player?.connection?.sendCommand("tp @s ${x.fmt()} ${y.fmt()} ${z.fmt()}")
+		val server = mc.singleplayerServer
+		if (server != null) {
+			server.execute {
+				serverPlayer(mc)?.teleportTo(x, y, z)
+			}
+		} else {
+			mc.player?.connection?.sendCommand("tp @s ${x.fmt()} ${y.fmt()} ${z.fmt()}")
+		}
 	}
 
 	// Teleports player to PRELOAD_HEIGHT above target and forces surrounding chunks.
@@ -213,9 +219,11 @@ data object AutoCapture {
 
 	// Discards any tagged mob and spawns a fresh one at (x, y, z) - no /summon command or log.
 	// Must run on the server thread (C2ME enforces thread-safe entity management).
-	private fun spawnMobEntity(mc: Minecraft, sLevel: ServerLevel, x: Double, y: Double, z: Double) {
+	private fun spawnMobEntity(mc: Minecraft, x: Double, y: Double, z: Double) {
 		val server = mc.singleplayerServer ?: return
+		val dimension = mc.level?.dimension() ?: Level.OVERWORLD
 		server.execute {
+			val sLevel = server.getLevel(dimension) ?: return@execute
 			sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
 			val entity = currentMobEntityType?.create(sLevel, EntitySpawnReason.COMMAND) ?: return@execute
 			entity.snapTo(x, y, z, 0f, 0f)
@@ -250,35 +258,39 @@ data object AutoCapture {
 	// Called every tick - only reads already-loaded chunks, never forces generation.
 	private fun advancePoolBuild(mc: Minecraft) {
 		if (poolBuildDone) return
-		val level = serverLevel(mc) ?: run { poolBuildDone = true; return }
-
-		var done = 0
-		while (done < POOL_BUILD_BATCH && poolBuildIndex < poolBuildQueue.size) {
-			val pos = poolBuildQueue[poolBuildIndex]
-			if (level.chunkSource.hasChunk(pos.worldX.toChunkCoord(), pos.worldZ.toChunkCoord())) {
-				val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, pos.worldX, pos.worldZ)
-				val biomeHolder = level.getBiome(BlockPos(pos.worldX, y, pos.worldZ))
-				val biomeKey = biomeHolder.unwrapKey().orElse(null)
-				if (biomeKey != null) {
-					val bucket = tempBucket(biomeHolder.value().baseTemperature)
-					val dx = (pos.worldX - baseX).toDouble()
-					val dz = (pos.worldZ - baseZ).toDouble()
-					val dist2 = dx * dx + dz * dz
-					val existing = poolBiomeMap[biomeKey]
-					val existingDist2 = existing?.let { (it.x - baseX).pow(2) + (it.z - baseZ).pow(2) } ?: -1.0
-					if (dist2 > existingDist2)
-						poolBiomeMap[biomeKey] =
-							BiomeRelocation(biomeKey, pos.worldX.toDouble(), pos.worldZ.toDouble(), bucket)
+		val server = mc.singleplayerServer ?: run { poolBuildDone = true; return }
+		val dimension = mc.level?.dimension() ?: Level.OVERWORLD
+		server.execute {
+			if (poolBuildDone) return@execute
+			val level = server.getLevel(dimension) ?: return@execute
+			var done = 0
+			while (done < POOL_BUILD_BATCH && poolBuildIndex < poolBuildQueue.size) {
+				val pos = poolBuildQueue[poolBuildIndex]
+				if (level.chunkSource.hasChunk(pos.worldX.toChunkCoord(), pos.worldZ.toChunkCoord())) {
+					val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, pos.worldX, pos.worldZ)
+					val biomeHolder = level.getBiome(BlockPos(pos.worldX, y, pos.worldZ))
+					val biomeKey = biomeHolder.unwrapKey().orElse(null)
+					if (biomeKey != null) {
+						val bucket = tempBucket(biomeHolder.value().baseTemperature)
+						val dx = (pos.worldX - baseX).toDouble()
+						val dz = (pos.worldZ - baseZ).toDouble()
+						val dist2 = dx * dx + dz * dz
+						val existing = poolBiomeMap[biomeKey]
+						val existingDist2 = existing?.let { (it.x - baseX).pow(2) + (it.z - baseZ).pow(2) } ?: -1.0
+						if (dist2 > existingDist2)
+							poolBiomeMap[biomeKey] =
+								BiomeRelocation(biomeKey, pos.worldX.toDouble(), pos.worldZ.toDouble(), bucket)
+					}
 				}
+				poolBuildIndex++
+				done++
 			}
-			poolBuildIndex++
-			done++
-		}
 
-		if (poolBuildIndex >= poolBuildQueue.size) {
-			relocationPool = poolBiomeMap.values.shuffled()
-			poolBiomeMap.clear()
-			poolBuildDone = true
+			if (poolBuildIndex >= poolBuildQueue.size) {
+				relocationPool = poolBiomeMap.values.shuffled()
+				poolBiomeMap.clear()
+				poolBuildDone = true
+			}
 		}
 	}
 
@@ -319,9 +331,8 @@ data object AutoCapture {
 		if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) return false
 		val (clearX, clearZ) = findClearPos(mc, x, z)
 		val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, clearX.toInt(), clearZ.toInt()).toDouble()
-		val sLevel = serverLevel(mc)
-		if (sLevel != null) {
-			spawnMobEntity(mc, sLevel, clearX, y, clearZ)
+		if (mc.singleplayerServer != null) {
+			spawnMobEntity(mc, clearX, y, clearZ)
 		} else {
 			val conn = mc.player?.connection ?: return false
 			conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
@@ -454,9 +465,8 @@ data object AutoCapture {
 		mobZ = clearMobZ
 		mobY = loadedSurfaceY(mc, mobX.toInt(), mobZ.toInt()) ?: surfY
 
-		val sLevel = serverLevel(mc)
-		if (sLevel != null) {
-			spawnMobEntity(mc, sLevel, mobX, mobY, mobZ)
+		if (mc.singleplayerServer != null) {
+			spawnMobEntity(mc, mobX, mobY, mobZ)
 		} else {
 			mc.player?.connection?.sendCommand(
 				"summon $currentMobRegName ${mobX.fmt()} ${mobY.fmt()} ${mobZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"],active_effects:[{id:\"minecraft:fire_resistance\",duration:-1,amplifier:0,ambient:0b,show_particles:0b,show_icon:0b}]}"
@@ -522,6 +532,19 @@ data object AutoCapture {
 		mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAuto-capture started$resumeMsg §8- §7/yolostop  /yoloclear"))
 		mc.player?.sendSystemMessage(Component.literal("§8  shots/mob: §f$SHOTS_PER_MOB §8| weather: §f$wDesc §8| time: §f+${TIME_PER_SHOT / 20}s/shot"))
 		mc.player?.sendSystemMessage(Component.literal("§8  relocate every §f$RELOCATE_EVERY §8shots | biome pre-map §f±${BIOME_SCAN_RADIUS}blk §8step §f$BIOME_PREMAP_STEP §8| §f${MOB_TYPES.size} §8mob types"))
+
+		val server = mc.singleplayerServer
+		if (server != null) {
+			server.execute {
+				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doMobSpawning false")
+				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doDaylightCycle false")
+				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doWeatherCycle false")
+			}
+		} else {
+			mc.player?.connection?.sendCommand("gamerule doMobSpawning false")
+			mc.player?.connection?.sendCommand("gamerule doDaylightCycle false")
+			mc.player?.connection?.sendCommand("gamerule doWeatherCycle false")
+		}
 	}
 
 	internal fun onClear() {
@@ -536,6 +559,19 @@ data object AutoCapture {
 			mc.options.fov().set(savedFov); savedFov = -1
 		}
 		mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] §fStopped - $mobIndex mobs, $totalShots shots captured"))
+
+		val server = mc.singleplayerServer
+		if (server != null) {
+			server.execute {
+				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doMobSpawning true")
+				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doDaylightCycle true")
+				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doWeatherCycle true")
+			}
+		} else {
+			mc.player?.connection?.sendCommand("gamerule doMobSpawning true")
+			mc.player?.connection?.sendCommand("gamerule doDaylightCycle true")
+			mc.player?.connection?.sendCommand("gamerule doWeatherCycle true")
+		}
 	}
 
 	// ── Main tick ─────────────────────────────────────────────────────────────
@@ -564,17 +600,19 @@ data object AutoCapture {
 
 			Phase.SETUP -> {
 				if (setupTick == 0) {
-					val sLevel = serverLevel(mc)
-					if (sLevel != null) {
-						mc.singleplayerServer!!.execute {
+					val server = mc.singleplayerServer
+					if (server != null) {
+						val dimension = mc.level?.dimension() ?: Level.OVERWORLD
+						server.execute {
+							val sLevel = server.getLevel(dimension) ?: return@execute
 							sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
 							sLevel.allEntities.filter { it !is ServerPlayer }.forEach { it.discard() }
+							serverPlayer(mc)?.gameMode?.changeGameModeForPlayer(GameType.SPECTATOR)
 						}
 					} else {
 						conn.sendCommand("kill @e[type=!player]")
+						conn.sendCommand("gamemode spectator")
 					}
-					serverPlayer(mc)?.gameMode?.changeGameModeForPlayer(GameType.SPECTATOR)
-						?: conn.sendCommand("gamemode spectator")
 					baseTime = Random.nextLong(0, 24000)
 					baseX = Random.nextInt(-500, 500)
 					baseZ = Random.nextInt(-500, 500)
