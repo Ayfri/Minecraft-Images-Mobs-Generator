@@ -545,8 +545,7 @@ data object AutoCapture {
 						sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
 						sLevel.allEntities.filter { it !is ServerPlayer }.forEach { it.discard() }
 					} else {
-						conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
-						conn.sendCommand("kill @e[type=!player,distance=..200]")
+						conn.sendCommand("kill @e[type=!player]")
 					}
 					serverPlayer(mc)?.gameMode?.changeGameModeForPlayer(GameType.SPECTATOR)
 						?: conn.sendCommand("gamemode spectator")
