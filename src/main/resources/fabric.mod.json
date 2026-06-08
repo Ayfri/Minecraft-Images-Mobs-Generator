@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "yologen",
+  "version": "${version}",
+  "name": "YOLO Dataset Generator",
+  "description": "Automatically generates YOLO dataset images and labels from Minecraft mob entities.",
+  "authors": ["Ayfri"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "main": [
+      {
+        "adapter": "kotlin",
+        "value": "com.ayfri.yologen.YoloGen"
+      }
+    ],
+    "client": [
+      {
+        "adapter": "kotlin",
+        "value": "com.ayfri.yologen.YoloGenClient"
+      }
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "fabric": "*",
+    "minecraft": "~26",
+    "fabric-language-kotlin": ">=1.13.12+kotlin.2.4.0"
+  }
+}
