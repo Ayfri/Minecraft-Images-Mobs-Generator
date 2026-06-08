@@ -19,6 +19,26 @@ import java.util.*
 import kotlin.math.*
 import kotlin.random.Random
 
+internal enum class WeatherPhase(val label: String, val fraction: Float) {
+	CLEAR("clear", 0.60f),
+	RAIN("rain", 0.20f),
+	THUNDER("thunder", 0.20f);
+
+	fun shots(total: Int): Int = (total * fraction).roundToInt()
+	val pct: Int get() = (fraction * 100).roundToInt()
+
+	companion object {
+		fun forShot(idx: Int, total: Int): WeatherPhase {
+			var rem = idx
+			for (phase in entries.dropLast(1)) {
+				if (rem < phase.shots(total)) return phase
+				rem -= phase.shots(total)
+			}
+			return entries.last()
+		}
+	}
+}
+
 data object AutoCapture {
 	internal const val BIOME_SCAN_RADIUS = 1000
 	private const val BIOME_PREMAP_STEP = 64
@@ -27,9 +47,8 @@ data object AutoCapture {
 	private const val PRELOAD_HEIGHT = 200.0
 	internal const val RELOCATE_EVERY = 10
 	internal const val SETUP_WAIT_TICKS = 70
-	internal const val SHOTS_CLEAR = 60
-	internal const val SHOTS_PER_MOB = 100
-	internal const val SHOTS_RAIN = 20
+	internal const val SHOTS_PER_MOB = 200
+	private const val TEMP_BUCKETS = 6
 	internal const val TERRAIN_WAIT_TICKS = 30
 	internal const val TIER_SIZE = 25
 	internal const val TIME_PER_SHOT = 400L
@@ -63,6 +82,7 @@ data object AutoCapture {
 	private var pendingMobSurfaceSnap: Pair<Double, Double>? = null
 	private var relocationCursor = 0
 	private var relocationPool = emptyList<BiomeRelocation>()
+	private var targetBucket = 0
 	private var targetPitch = 0f
 	private var targetYaw = 0f
 
@@ -77,18 +97,24 @@ data object AutoCapture {
 
 	internal enum class Phase { IDLE, SETUP, CAPTURING }
 
-	private data class BiomeRelocation(val biome: ResourceKey<Biome>, val x: Double, val z: Double)
+	private data class BiomeRelocation(val biome: ResourceKey<Biome>, val x: Double, val z: Double, val tempBucket: Int)
 
 	private val mobTypes = YOLO_CLASS_MAP.keys.toList()
 
 	private fun Double.fmt(decimals: Int = 2) = String.format(Locale.ROOT, "%.${decimals}f", this)
 	private fun Int.toChunkCoord() = floorDiv(16)
 
-	internal fun weatherForShot(idx: Int) = when {
-		idx < SHOTS_CLEAR -> "clear"
-		idx < SHOTS_CLEAR + SHOTS_RAIN -> "rain"
-		else -> "thunder"
+	// Temperature → climate bucket: 0=frozen, 1=cold, 2=cool, 3=temperate, 4=warm, 5=hot
+	private fun tempBucket(temp: Float) = when {
+		temp < 0.0f -> 0
+		temp < 0.3f -> 1
+		temp < 0.5f -> 2
+		temp < 0.8f -> 3
+		temp < 1.2f -> 4
+		else -> 5
 	}
+
+	internal fun weatherForShot(idx: Int) = WeatherPhase.forShot(idx, SHOTS_PER_MOB).label
 
 	private fun loadedSurfaceY(mc: Minecraft, x: Int, z: Int): Double? {
 		val level = mc.level ?: return null
@@ -166,6 +192,8 @@ data object AutoCapture {
 				val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, pos.worldX, pos.worldZ)
 				val biome = level.getBiome(BlockPos(pos.worldX, y, pos.worldZ)).unwrapKey().orElse(null)
 				if (biome != null) {
+					val biomeHolder = level.getBiome(BlockPos(pos.worldX, y, pos.worldZ))
+					val bucket = tempBucket(biomeHolder.value().baseTemperature)
 					val dx = (pos.worldX - baseX).toDouble()
 					val dz = (pos.worldZ - baseZ).toDouble()
 					val dist2 = dx * dx + dz * dz
@@ -174,7 +202,7 @@ data object AutoCapture {
 						(it.x - baseX).pow(2) + (it.z - baseZ).pow(2)
 					} ?: -1.0
 					if (dist2 > existingDist2) poolBiomeMap[biome] =
-						BiomeRelocation(biome, pos.worldX.toDouble(), pos.worldZ.toDouble())
+						BiomeRelocation(biome, pos.worldX.toDouble(), pos.worldZ.toDouble(), bucket)
 				}
 			}
 			poolBuildIndex++
@@ -211,10 +239,10 @@ data object AutoCapture {
 		val baseAngle = (shotIdx % TIER_SIZE).toDouble() / TIER_SIZE * 2 * PI
 		val angle = baseAngle + Random.nextDouble(-PI / TIER_SIZE, PI / TIER_SIZE)
 		return when (tier) {
-			0 -> Triple(angle, Random.nextDouble(3.5, 8.0), Random.nextDouble(0.4, 1.8))
-			1 -> Triple(angle, Random.nextDouble(7.0, 13.0), Random.nextDouble(1.5, 5.0))
-			2 -> Triple(angle, Random.nextDouble(11.0, 19.0), Random.nextDouble(4.0, 10.0))
-			else -> Triple(angle, Random.nextDouble(2.0, 6.0), Random.nextDouble(9.0, 16.0))
+			0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))
+			1 -> Triple(angle, Random.nextDouble(5.0, 9.0), Random.nextDouble(1.2, 4.0))
+			2 -> Triple(angle, Random.nextDouble(8.0, 14.0), Random.nextDouble(3.5, 8.0))
+			else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0))
 		}
 	}
 
@@ -255,14 +283,29 @@ data object AutoCapture {
 	}
 
 	private fun chooseRelocation(mc: Minecraft): Pair<Double, Double> {
-		val currentKey =
-			mc.level?.getBiome(BlockPos(mobX.toInt(), mobY.toInt(), mobZ.toInt()))?.unwrapKey()?.orElse(null)
+		val currentBiomeHolder = mc.level?.getBiome(BlockPos(mobX.toInt(), mobY.toInt(), mobZ.toInt()))
+		val currentKey = currentBiomeHolder?.unwrapKey()?.orElse(null)
+		val currentBucket = currentBiomeHolder?.value()?.baseTemperature?.let { tempBucket(it) } ?: -1
 
 		if (relocationPool.isNotEmpty()) {
-			repeat(relocationPool.size) {
-				val candidate = relocationPool[relocationCursor % relocationPool.size]
+			// Try buckets from targetBucket onward, skipping the current climate zone
+			for (offset in 0 until TEMP_BUCKETS) {
+				val bucket = (targetBucket + offset) % TEMP_BUCKETS
+				if (bucket == currentBucket) continue
+				val candidates = relocationPool.filter { it.tempBucket == bucket && it.biome != currentKey }
+				if (candidates.isNotEmpty()) {
+					val pick = candidates[relocationCursor % candidates.size]
+					relocationCursor++
+					targetBucket = (bucket + 1) % TEMP_BUCKETS
+					return pick.x to pick.z
+				}
+			}
+			// Fallback: any different biome (same climate zone acceptable)
+			val anyOther = relocationPool.filter { it.biome != currentKey }
+			if (anyOther.isNotEmpty()) {
+				val pick = anyOther[relocationCursor % anyOther.size]
 				relocationCursor++
-				if (candidate.biome != currentKey) return candidate.x to candidate.z
+				return pick.x to pick.z
 			}
 		}
 
@@ -289,8 +332,8 @@ data object AutoCapture {
 		val regName = BuiltInRegistries.ENTITY_TYPE.getKey(mobTypes.random()).toString()
 		currentMobRegName = regName
 		currentMobName = regName.substringAfter(':')
-		mobX = baseX + Random.nextInt(-5, 5).toDouble()
-		mobZ = baseZ + Random.nextInt(-5, 5).toDouble()
+		mobX = baseX + Random.nextInt(-30, 30).toDouble()
+		mobZ = baseZ + Random.nextInt(-30, 30).toDouble()
 		mobY = loadedSurfaceY(mc, mobX.toInt(), mobZ.toInt()) ?: surfY
 		conn.sendCommand("summon $regName ${mobX.fmt()} ${mobY.fmt()} ${mobZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}")
 		pendingMobSurfaceSnap = mobX to mobZ
@@ -324,6 +367,7 @@ data object AutoCapture {
 		nextRelocation = null
 		pendingMobSurfaceSnap = null
 		relocationCursor = 0
+		targetBucket = 0
 	}
 
 	private fun resetMobState() {
@@ -340,13 +384,11 @@ data object AutoCapture {
 		mobIndex = 0; totalShots = 0
 		safeY = mc.player?.y ?: 64.0
 		DatasetCapture.autoMode = false
-		baseX = Random.nextInt(-500, 500); baseZ = Random.nextInt(-500, 500)
 		resetMobState()
-		startPoolBuild()
 
-		val thunderShots = SHOTS_PER_MOB - SHOTS_CLEAR - SHOTS_RAIN
+		val wDesc = WeatherPhase.entries.joinToString(" ") { "${it.pct}%${it.label.first()}" }
 		mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAuto-capture started §8- §7/yolostop  /yoloclear"))
-		mc.player?.sendSystemMessage(Component.literal("§8  shots/mob: §f$SHOTS_PER_MOB §8| weather: §a${SHOTS_CLEAR}cl §9${SHOTS_RAIN}ra §5${thunderShots}th §8| time: §f+${TIME_PER_SHOT / 20}s/shot"))
+		mc.player?.sendSystemMessage(Component.literal("§8  shots/mob: §f$SHOTS_PER_MOB §8| weather: §f$wDesc §8| time: §f+${TIME_PER_SHOT / 20}s/shot"))
 		mc.player?.sendSystemMessage(Component.literal("§8  relocate every §f$RELOCATE_EVERY §8shots | biome pre-map §f±${BIOME_SCAN_RADIUS}blk §8step §f$BIOME_PREMAP_STEP §8| §f${MOB_TYPES.size} §8mob types"))
 	}
 
@@ -384,7 +426,10 @@ data object AutoCapture {
 					conn.sendCommand("kill @e[type=!player,distance=..200]")
 					conn.sendCommand("gamemode spectator")
 					baseTime = Random.nextLong(0, 24000)
-					resetShotState()
+					baseX = Random.nextInt(-500, 500)
+					baseZ = Random.nextInt(-500, 500)
+					resetMobState()
+					startPoolBuild()
 					preloadPosition(mc, baseX.toDouble(), baseZ.toDouble())
 				}
 
