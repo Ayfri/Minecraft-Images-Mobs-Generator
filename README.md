@@ -102,7 +102,8 @@ When started, the bot sets FOV to **70**, prints its current settings to chat, a
    Y=200 to load terrain
 3. From tick 45: wait until the target chunk is loaded, land on the real surface, summon one tagged NoAI random mob
    at a tree-free position (up to 25 attempts comparing `MOTION_BLOCKING` vs `MOTION_BLOCKING_NO_LEAVES`),
-   then snap it to the loaded surface
+   then snap it to the loaded surface. The mob is spawned with infinite fire resistance (no particles/icon) and
+   `Invulnerable` so it never burns, takes damage, or catches fire visually
 
 **CAPTURING phase** (200 shots, 3 ticks each, ~30 s):
 

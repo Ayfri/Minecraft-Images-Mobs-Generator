@@ -10,6 +10,8 @@ import net.minecraft.resources.ResourceKey
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.clock.WorldClocks
+import net.minecraft.world.effect.MobEffectInstance
+import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.entity.EntitySpawnReason
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.Mob
@@ -210,7 +212,9 @@ data object AutoCapture {
 		val entity = currentMobEntityType?.create(sLevel, EntitySpawnReason.COMMAND) ?: return
 		entity.snapTo(x, y, z, 0f, 0f)
 		entity.isInvulnerable = true
+		entity.clearFire()
 		(entity as? Mob)?.isNoAi = true
+		(entity as? LivingEntity)?.addEffect(MobEffectInstance(MobEffects.FIRE_RESISTANCE, -1, 0, false, false, false))
 		entity.addTag(MOB_TAG)
 		sLevel.addFreshEntity(entity)
 	}
@@ -312,7 +316,7 @@ data object AutoCapture {
 		} else {
 			val conn = mc.player?.connection ?: return false
 			conn.sendCommand("tp @e[tag=$MOB_TAG] ~ -120 ~")
-			conn.sendCommand("summon $currentMobRegName ${clearX.fmt()} ${y.fmt()} ${clearZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}")
+			conn.sendCommand("summon $currentMobRegName ${clearX.fmt()} ${y.fmt()} ${clearZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"],active_effects:[{id:\"minecraft:fire_resistance\",duration:-1,amplifier:0,ambient:0b,show_particles:0b,show_icon:0b}]}")
 		}
 		mobX = clearX; mobY = y; mobZ = clearZ
 		nextRelocation = null
@@ -446,7 +450,7 @@ data object AutoCapture {
 			spawnMobEntity(sLevel, mobX, mobY, mobZ)
 		} else {
 			mc.player?.connection?.sendCommand(
-				"summon $currentMobRegName ${mobX.fmt()} ${mobY.fmt()} ${mobZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"]}"
+				"summon $currentMobRegName ${mobX.fmt()} ${mobY.fmt()} ${mobZ.fmt()} {Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"],active_effects:[{id:\"minecraft:fire_resistance\",duration:-1,amplifier:0,ambient:0b,show_particles:0b,show_icon:0b}]}"
 			)
 		}
 		pendingMobSurfaceSnap = mobX to mobZ
