@@ -369,17 +369,22 @@ data object AutoCapture {
 
 	// ── Orbit + rotation ──────────────────────────────────────────────────────
 
-	// Tier-based orbit: 4×50 shots spanning 360° with even spacing + jitter per tier.
-	// Tier 0: close-ground  Tier 1: medium-mid  Tier 2: far-high  Tier 3: top-down
+	// Tier-based orbit: tiers 0-5 favour side/angled views; tiers 6+ (else) are top-down.
+	// With TIER_SIZE=25 and SHOTS_PER_MOB=200: 150 side shots (75%) + 50 top-down (25%).
+	// Tier 0: close ground  Tier 1: medium low  Tier 2: far moderate
+	// Tier 3: close side    Tier 4: medium mid  Tier 5: far low    Tier 6+: top-down
 	private fun orbitParams(shotIdx: Int): Triple<Double, Double, Double> {
 		val tier = shotIdx / TIER_SIZE
 		val baseAngle = (shotIdx % TIER_SIZE).toDouble() / TIER_SIZE * 2 * PI
 		val angle = baseAngle + Random.nextDouble(-PI / TIER_SIZE, PI / TIER_SIZE)
 		return when (tier) {
-			0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))
-			1 -> Triple(angle, Random.nextDouble(5.0, 9.0), Random.nextDouble(1.2, 4.0))
-			2 -> Triple(angle, Random.nextDouble(8.0, 14.0), Random.nextDouble(3.5, 8.0))
-			else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0))
+			0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))   // close, almost horizontal
+			1 -> Triple(angle, Random.nextDouble(5.0, 9.0), Random.nextDouble(1.0, 3.0))   // medium, slight angle
+			2 -> Triple(angle, Random.nextDouble(9.0, 15.0), Random.nextDouble(1.5, 4.0))  // far, moderate angle
+			3 -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(0.3, 2.0))   // close, side repeat
+			4 -> Triple(angle, Random.nextDouble(6.0, 11.0), Random.nextDouble(2.5, 6.0))  // medium, mid-height
+			5 -> Triple(angle, Random.nextDouble(10.0, 17.0), Random.nextDouble(0.5, 3.0)) // far, eye-level
+			else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0)) // top-down
 		}
 	}
 
