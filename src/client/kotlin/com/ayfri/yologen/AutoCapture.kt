@@ -6,136 +6,152 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
 import net.minecraft.client.Minecraft
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.network.chat.Component
+import net.minecraft.world.level.levelgen.Heightmap
+import java.util.*
 import kotlin.math.*
 import kotlin.random.Random
 
 object AutoCapture {
-    private const val SHOTS_PER_MOB = 100
-    private const val SETUP_WAIT_TICKS = 40
-    private const val MAX_DIST = 12.0
-    private const val MIN_DIST = 3.0
+	private const val SHOTS_PER_MOB = 100
+	private const val SETUP_WAIT_TICKS = 40
+	private const val MAX_DIST = 12.0
+	private const val MIN_DIST = 3.0
 
-    private var running = false
-    private var phase = Phase.IDLE
-    private var setupTick = 0
-    private var shotCount = 0
-    private var subTick = 0
+	private var running = false
+	private var phase = Phase.IDLE
+	private var setupTick = 0
+	private var shotCount = 0
+	private var subTick = 0
 
-    private var mobX = 0.0
-    private var mobY = 64.0
-    private var mobZ = 0.0
+	private var mobX = 0.0
+	private var mobY = 64.0
+	private var mobZ = 0.0
 
-    private enum class Phase { IDLE, SETUP, WAITING, CAPTURING }
+	private enum class Phase { IDLE, SETUP, WAITING, CAPTURING }
 
-    private val mobTypes = YOLO_CLASS_MAP.keys.toList()
+	private val mobTypes = YOLO_CLASS_MAP.keys.toList()
 
-    fun register() {
-        ClientCommandRegistrationCallback.EVENT.register { dispatcher, _ ->
-            dispatcher.register(
-                ClientCommands.literal("yologen").executes { ctx ->
-                    if (running) stop(ctx.source.client) else start(ctx.source.client)
-                    1
-                }
-            )
-        }
+	private fun Double.fmt(decimals: Int = 2) = String.format(Locale.ROOT, "%.${decimals}f", this)
 
-        ClientTickEvents.END_CLIENT_TICK.register { mc ->
-            if (running) tick(mc)
-        }
-    }
+	private fun surfaceY(mc: Minecraft, x: Int, z: Int): Double {
+		val level = mc.level ?: return 64.0
+		return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z).toDouble()
+	}
 
-    private fun start(mc: Minecraft) {
-        running = true
-        phase = Phase.SETUP
-        setupTick = 0
-        shotCount = 0
-        subTick = 0
-        DatasetCapture.autoMode = false
-        mc.player?.displayClientMessage(Component.literal("[YoloGen] Auto-capture started — /yologen to stop"), false)
-    }
+	fun register() {
+		ClientCommandRegistrationCallback.EVENT.register { dispatcher, _ ->
+			dispatcher.register(
+				ClientCommands.literal("yologen").executes { ctx ->
+					if (running) stop(ctx.source.client) else start(ctx.source.client)
+					1
+				}
+			)
+		}
 
-    private fun stop(mc: Minecraft) {
-        running = false
-        phase = Phase.IDLE
-        DatasetCapture.autoMode = true
-        mc.player?.displayClientMessage(Component.literal("[YoloGen] Auto-capture stopped"), false)
-    }
+		ClientTickEvents.END_CLIENT_TICK.register { mc ->
+			if (running) tick(mc)
+		}
+	}
 
-    private fun tick(mc: Minecraft) {
-        val player = mc.player ?: return
-        val conn = player.connection
+	private fun start(mc: Minecraft) {
+		running = true
+		phase = Phase.SETUP
+		setupTick = 0
+		shotCount = 0
+		subTick = 0
+		DatasetCapture.autoMode = false
+		mc.player?.sendSystemMessage(Component.literal("[YoloGen] Auto-capture started - /yologen to stop"))
+	}
 
-        when (phase) {
-            Phase.IDLE -> {}
+	private fun stop(mc: Minecraft) {
+		running = false
+		phase = Phase.IDLE
+		DatasetCapture.autoMode = true
+		mc.player?.sendSystemMessage(Component.literal("[YoloGen] Auto-capture stopped"))
+	}
 
-            Phase.SETUP -> {
-                if (setupTick == 0) {
-                    conn.sendCommand("kill @e[type=!player,distance=..200]")
+	private fun tick(mc: Minecraft) {
+		val player = mc.player ?: return
+		val conn = player.connection
 
-                    val baseX = Random.nextInt(-500, 500)
-                    val baseZ = Random.nextInt(-500, 500)
-                    conn.sendCommand("tp @s $baseX 64 $baseZ")
-                    conn.sendCommand("time set ${Random.nextInt(0, 24000)}")
-                    conn.sendCommand("weather ${listOf("clear", "rain", "thunder").random()}")
+		when (phase) {
+			Phase.IDLE -> {}
 
-                    val mobType = mobTypes.random()
-                    val regName = BuiltInRegistries.ENTITY_TYPE.getKey(mobType)?.toString()
-                        ?: run { setupTick = 0; return }
+			Phase.SETUP -> {
+				if (setupTick == 0) {
+					conn.sendCommand("kill @e[type=!player,distance=..200]")
 
-                    mobX = baseX + Random.nextInt(-6, 6).toDouble()
-                    mobY = 64.0
-                    mobZ = baseZ + Random.nextInt(-6, 6).toDouble()
+					val baseX = Random.nextInt(-500, 500)
+					val baseZ = Random.nextInt(-500, 500)
+					val baseY = surfaceY(mc, baseX, baseZ)
+					conn.sendCommand("tp @s ${baseX.toDouble().fmt()} ${baseY.fmt()} ${baseZ.toDouble().fmt()}")
+					conn.sendCommand("time set ${Random.nextInt(0, 24000)}")
+					conn.sendCommand("weather ${listOf("clear", "rain", "thunder").random()}")
 
-                    conn.sendCommand("summon $regName ${mobX.toInt()} ${mobY.toInt()} ${mobZ.toInt()}")
+					val mobType = mobTypes.random()
+					val regName = BuiltInRegistries.ENTITY_TYPE.getKey(mobType)?.toString()
+						?: run { setupTick = 0; return }
 
-                    shotCount = 0
-                    subTick = 0
-                }
-                setupTick++
-                if (setupTick >= SETUP_WAIT_TICKS) {
-                    setupTick = 0
-                    phase = Phase.CAPTURING
-                }
-            }
+					mobX = baseX + Random.nextInt(-6, 6).toDouble()
+					mobZ = baseZ + Random.nextInt(-6, 6).toDouble()
+					mobY = surfaceY(mc, mobX.toInt(), mobZ.toInt())
 
-            Phase.CAPTURING -> {
-                when (subTick) {
-                    0 -> {
-                        val angle = Random.nextDouble(0.0, 2 * PI)
-                        val dist = Random.nextDouble(MIN_DIST, MAX_DIST)
-                        val heightOffset = Random.nextDouble(-0.5, 4.0)
+					conn.sendCommand("summon $regName ${mobX.fmt()} ${mobY.fmt()} ${mobZ.fmt()}")
 
-                        val px = mobX + cos(angle) * dist
-                        val py = mobY + heightOffset
-                        val pz = mobZ + sin(angle) * dist
+					shotCount = 0
+					subTick = 0
+				}
+				setupTick++
+				if (setupTick >= SETUP_WAIT_TICKS) {
+					setupTick = 0
+					phase = Phase.CAPTURING
+				}
+			}
 
-                        val dx = mobX - px
-                        val dy = mobY + 1.0 - py
-                        val dz = mobZ - pz
-                        val h = sqrt(dx * dx + dz * dz)
-                        val yaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
-                        val pitch = (-Math.toDegrees(atan2(dy, h))).toFloat()
+			Phase.CAPTURING -> {
+				when (subTick) {
+					0 -> {
+						val angle = Random.nextDouble(0.0, 2 * PI)
+						val dist = Random.nextDouble(MIN_DIST, MAX_DIST)
+						val heightOffset = Random.nextDouble(0.5, 4.0)
 
-                        conn.sendCommand("tp @s ${"%.2f".format(px)} ${"%.2f".format(py)} ${"%.2f".format(pz)} ${"%.1f".format(yaw)} ${"%.1f".format(pitch)}")
-                        subTick = 1
-                    }
+						val px = mobX + cos(angle) * dist
+						val pz = mobZ + sin(angle) * dist
+						val groundY = surfaceY(mc, px.toInt(), pz.toInt())
+						val py = maxOf(groundY + heightOffset, mobY + heightOffset)
 
-                    1 -> subTick = 2
+						val targetY = mobY + 1.0
+						val dx = mobX - px
+						val dy = targetY - py
+						val dz = mobZ - pz
+						val h = sqrt(dx * dx + dz * dz)
+						val yaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
+						val pitch = (-Math.toDegrees(atan2(dy, h))).toFloat()
 
-                    2 -> {
-                        DatasetCapture.pendingCapture = true
-                        shotCount++
-                        subTick = 0
+						conn.sendCommand(
+							"tp @s ${px.fmt()} ${py.fmt()} ${pz.fmt()} ${
+								yaw.toDouble().fmt(1)
+							} ${pitch.toDouble().fmt(1)}"
+						)
+						subTick = 1
+					}
 
-                        if (shotCount >= SHOTS_PER_MOB) {
-                            phase = Phase.SETUP
-                            setupTick = 0
-                        }
-                    }
-                }
-            }
+					1 -> subTick = 2
 
-            Phase.WAITING -> {}
-        }
-    }
+					2 -> {
+						DatasetCapture.pendingCapture = true
+						shotCount++
+						subTick = 0
+
+						if (shotCount >= SHOTS_PER_MOB) {
+							phase = Phase.SETUP
+							setupTick = 0
+						}
+					}
+				}
+			}
+
+			Phase.WAITING -> {}
+		}
+	}
 }
