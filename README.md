@@ -82,26 +82,31 @@ All values are normalized to `[0, 1]` relative to the screen dimensions.
 
 ## Automation
 
-To generate large datasets quickly, run a repeating command loop in-game (requires cheats):
+### Built-in bot command
 
-```
-# Summon a mix of mobs around the player, wait a few ticks, kill them, repeat
-/summon minecraft:zombie ~ ~ ~3
-/summon minecraft:skeleton ~ ~ ~-3
-/summon minecraft:creeper ~3 ~ ~
-# ... etc
-/kill @e[type=!player]
-```
+Type `/yologen` in-game to start (or stop) the automated capture bot. **Requires cheats / op.**
 
-Or use a command block chain / a data pack that:
+The bot loops indefinitely:
 
-1. Teleports the player to a random location
-2. Sets random time (`/time set <0-24000>`) and weather
-3. Summons a random selection of mobs at varying distances and angles
-4. Waits ~2 seconds (40 ticks) for the mod to capture several frames
-5. Kills all non-player entities and repeats
+1. Kills all nearby entities from the previous round
+2. Teleports the player to a random location (±500 blocks)
+3. Sets a random time of day and random weather
+4. Summons a random mob from the class map nearby
+5. Takes **100 screenshots** from different positions around the mob — each time teleporting the player to a new random distance (3–12 blocks), height, and angle, waiting 2 ticks for the server to process, then capturing
 
-A flat superflat world with no structures keeps the background uniform and reduces label noise.
+Each full mob cycle takes ~15 seconds (100 shots × 3 ticks + 40-tick setup wait). With 87 mob types, a full pass generates ~8700 labelled frames and takes ~22 minutes unattended.
+
+### Manual automation
+
+For custom scenarios (multiple mobs, specific biomes, etc.), use a command block chain or data pack:
+
+1. Teleport the player to a location
+2. Set time and weather
+3. Summon a mix of mobs
+4. Wait 40 ticks
+5. Kill all non-player entities and repeat
+
+A superflat world keeps backgrounds uniform and reduces noise.
 
 ---
 
