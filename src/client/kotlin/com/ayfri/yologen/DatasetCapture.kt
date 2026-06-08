@@ -9,6 +9,11 @@ import java.util.concurrent.Executors
 object DatasetCapture {
     private const val CAPTURE_EVERY_N_FRAMES = 20
 
+    var autoMode = true
+
+    @Volatile
+    var pendingCapture = false
+
     private var frameCount = 0
     private var captureIndex = 0
 
@@ -18,7 +23,9 @@ object DatasetCapture {
 
     fun register() {
         LevelRenderEvents.END_MAIN.register { context ->
-            if (++frameCount % CAPTURE_EVERY_N_FRAMES != 0) return@register
+            val shouldCapture = pendingCapture || (autoMode && ++frameCount % CAPTURE_EVERY_N_FRAMES == 0)
+            if (!shouldCapture) return@register
+            pendingCapture = false
 
             val mc = Minecraft.getInstance()
             val levelState = context.levelState()
