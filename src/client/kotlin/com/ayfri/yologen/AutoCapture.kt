@@ -225,6 +225,20 @@ data object AutoCapture {
 		p.xRot = targetPitch; p.xRotO = targetPitch
 	}
 
+	// Recomputes yaw/pitch toward the mob from the player's actual current position, then applies.
+	// Use in subTick 1+ so the teleport has (partially) resolved before we lock the angle.
+	private fun recomputeAndApplyRotation(mc: Minecraft) {
+		val p = mc.player ?: return
+		val dx = mobX - p.x
+		val dy = (mobY + 1.0) - p.eyeY
+		val dz = mobZ - p.z
+		val h = sqrt(dx * dx + dz * dz)
+		if (h < 0.01 && abs(dy) < 0.01) return   // degenerate case: on top of mob
+		targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
+		targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat()
+		applyRotation(mc)
+	}
+
 	// Lightweight fallback: picks a random far position at a different biome via sparse sampling.
 	private fun findNewBiomePosition(mc: Minecraft): Pair<Int, Int>? {
 		val level = mc.level ?: return null
@@ -403,6 +417,9 @@ data object AutoCapture {
 					if (terrainWaitTick > 0) return
 				}
 
+				// Defensively re-lock rotation every tick in case a server packet reset it.
+				if (subTick > 0) applyRotation(mc)
+
 				when (subTick) {
 					0 -> {
 						updateMobPosition(mc)
@@ -443,11 +460,11 @@ data object AutoCapture {
 					}
 
 					1 -> {
-						applyRotation(mc); subTick = 2
+						recomputeAndApplyRotation(mc); subTick = 2
 					}
 
 					2 -> {
-						applyRotation(mc)
+						recomputeAndApplyRotation(mc)
 						// Only capture if no solid block occludes the mob.
 						if (isVisible(mc)) {
 							DatasetCapture.pendingCaptureMetadata = CaptureMetadata(
