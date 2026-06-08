@@ -1,21 +1,60 @@
-# YOLO Dataset Generator - Minecraft Fabric Mod
+# Minecraft Mobs YOLO Dataset Generator
 
-Fabric client-side mod for Minecraft 26.1.2 that automatically captures screenshots and generates YOLO-format bounding
-box labels for every mob visible on screen.
+Fabric client-side mod for Minecraft 26.1.2 that auto-generates a labeled image dataset of all Minecraft mobs in YOLO format.
+
+Built as the data generation step for a computer vision course exercise (object detection). The AI training code lives in a separate repository.
+
+---
+
+## Dataset
+
+The bot iterates through all 87 mob classes in order, captures 200 shots per mob from varying angles, lighting, weather, and biomes, then writes everything to `<game-dir>/dataset/`.
+
+```
+dataset/
+- images/          512x288 PNG frames
+- frames.csv       frame-level metadata (mob, weather, time, position)
+- boxes.csv        one row per bounding box, joinable on `frame`
+- progress.txt     completed mobs - allows resuming after a stop or crash
+```
+
+**`frames.csv`**
+
+| column       | description                          |
+|--------------|--------------------------------------|
+| `frame`      | filename stem, e.g. `frame_000042`   |
+| `mob`        | mob registry name, e.g. `zombie`     |
+| `weather`    | `clear` / `rain` / `thunder`         |
+| `time_ticks` | in-game time of the shot (0-23999)   |
+| `shot`       | shot index within this mob (0-199)   |
+| `mob_idx`    | which mob in the ordered class list  |
+| `mob_x/y/z`  | world position of the mob entity     |
+
+**`boxes.csv`**
+
+| column        | description                                  |
+|---------------|----------------------------------------------|
+| `frame`       | links back to `frames.csv`                   |
+| `class_id`    | YOLO class index (see class map below)       |
+| `cx`, `cy`    | bounding-box center, normalized to `[0, 1]`  |
+| `w`, `h`      | bounding-box size, normalized to `[0, 1]`    |
+| `dist_blocks` | camera to entity-center distance in blocks   |
+
+### Dataset properties
+
+- **Ready for YOLO** - bounding boxes are in normalized YOLO format, no preprocessing needed to plug into YOLOv8/v11
+- **Perfect ground truth** - labels are computed from 3D projection math, not hand-annotated, so there is zero annotation error
+- **Scale** - 87 classes x 200 shots = ~17 400 labeled frames generated unattended in ~92 minutes
+- **Controlled diversity** - every mob is captured across 6 weather states, a full 24h lighting cycle, 6 biome temperature buckets (frozen to hot), and 7 orbit tiers covering close/far/top-down viewpoints
+- **Metadata for analysis** - `frames.csv` lets you slice by weather, time, or distance to study how conditions affect detection quality
 
 ---
 
 ## How it works
 
-The mod hooks into `LevelRenderEvents.END_MAIN` each frame and:
+Each frame, the mod reads the render state and projects every entity's AABB corners through the view x projection matrix to screen space. If the resulting box is at least 5px and the entity is in the class map, it is recorded. Screenshots are scaled to 1280x720 then cropped 30% from each edge to 512x288.
 
-1. Reads the current frame's render state (camera, projection matrix, entity list)
-2. Projects each entity's 8 AABB corners to screen space via the view × projection matrices
-3. Discards boxes that are invisible, not in the class map, or smaller than 5 px
-4. If at least one valid box exists: saves a PNG + appends rows to `frames.csv` and `boxes.csv`
-
-Images are scaled to 1280×720 then cropped 30% from each edge → **512×288** final resolution.
-Output is written to `<game-dir>/dataset/` on a 4-thread background IO pool so the render loop is never blocked.
+The auto-capture bot (`/yologen`) handles the full pipeline unattended: it iterates through every mob in order, teleports the player to orbit positions around the mob, varies weather and time per shot, relocates to different biomes every 10 shots, and writes progress after each mob so the session can resume after a crash or manual stop.
 
 ---
 
@@ -35,102 +74,25 @@ Output is written to `<game-dir>/dataset/` on a 4-thread background IO pool so t
 ./gradlew build
 ```
 
-The mod JAR is output to `build/libs/`. Copy it to your Minecraft `mods/` folder along with Fabric API and Fabric
-Language Kotlin.
-
----
-
-## Dataset output
-
-```
-<game-dir>/
-└── dataset/
-    ├── images/
-    │   ├── frame_000000.png   (512×288 PNG)
-    │   └── ...
-    ├── frames.csv             (one row per captured frame)
-    └── boxes.csv              (one row per bounding box, joinable on `frame`)
-```
-
-**`frames.csv`** — frame-level metadata:
-
-| column       | description                         |
-|--------------|-------------------------------------|
-| `frame`      | filename stem, e.g. `frame_000042`  |
-| `mob`        | mob registry name, e.g. `zombie`    |
-| `weather`    | `clear` / `rain` / `thunder`        |
-| `time_ticks` | in-game time of the shot (0–23999)  |
-| `shot`       | shot index within this mob (0–199)  |
-| `mob_idx`    | mob counter across the full session |
-| `mob_x/y/z`  | world position of the mob entity    |
-
-**`boxes.csv`** — one row per detected entity per frame:
-
-| column        | description                                 |
-|---------------|---------------------------------------------|
-| `frame`       | links back to `frames.csv`                  |
-| `class_id`    | YOLO class index (see class map below)      |
-| `cx`, `cy`    | bounding-box center, normalized to `[0, 1]` |
-| `w`, `h`      | bounding-box size, normalized to `[0, 1]`   |
-| `dist_blocks` | camera → entity-center distance in blocks   |
-
-Both files are created on first capture with their header row, then appended atomically (synchronized) for every
-subsequent frame.
+Output goes to `build/libs/`. Copy the JAR to your Minecraft `mods/` folder alongside Fabric API and Fabric Language Kotlin.
 
 ---
 
 ## Commands
 
-| Command      | Effect                               |
-|--------------|--------------------------------------|
-| `/yologen`   | Toggle the auto-capture bot on / off |
-| `/yolostop`  | Stop the bot explicitly              |
-| `/yoloclear` | Delete the entire `dataset/` folder  |
+| Command      | Effect                                                          |
+|--------------|-----------------------------------------------------------------|
+| `/yologen`   | Start the bot (or stop it if running). Resumes from last saved mob. |
+| `/yolostop`  | Stop the bot explicitly                                         |
+| `/yoloclear` | Stop the bot, delete the entire `dataset/` folder and reset progress |
 
 All commands require cheats / op.
 
 ---
 
-## Auto-capture bot (`/yologen`)
-
-When started, the bot sets FOV to **70**, prints its current settings to chat, and loops indefinitely:
-
-**SETUP phase** (70 ticks minimum, ~3.5 s):
-
-1. Kill previous generated entities and nearby mobs, switch to spectator mode
-2. Pick random XZ (±500 blocks), pre-map distinct biome relocation candidates in a ±600-block grid, and teleport to
-   Y=200 to load terrain
-3. From tick 45: wait until the target chunk is loaded, land on the real surface, summon one tagged NoAI random mob
-   at a tree-free position (up to 25 attempts comparing `MOTION_BLOCKING` vs `MOTION_BLOCKING_NO_LEAVES`),
-   then snap it to the loaded surface. The mob is spawned with infinite fire resistance (no particles/icon) and
-   `Invulnerable` so it never burns, takes damage, or catches fire visually
-
-**CAPTURING phase** (200 shots, 3 ticks each, ~30 s):
-
-- Each shot: teleport player to an orbit position, recompute yaw/pitch toward mob, capture
-- 7 orbit tiers (TIER_SIZE=25): 6 side/angled tiers + top-down for the last 2 tiers only (25% of shots)
-  , close ground (2.5–5.5 blk, 0.3–1.5 blk height), medium low (5–9 blk, 1–3 blk), far moderate (9–15 blk, 1.5–4 blk),
-  close side (3–6 blk, 0.3–2 blk), medium mid (6–11 blk, 2.5–6 blk), far eye-level (10–17 blk, 0.5–3 blk),
-  then top-down (2–5 blk dist, 8–14 blk height)
-- Every 10 shots: pull next entry from the pre-mapped biome pool (6 temperature buckets:
-  frozen/cold/cool/temperate/warm/hot, always cycling away from the current bucket), pre-load the target chunk async,
-  teleport mob, wait `TERRAIN_POST_SNAP_TICKS` for meshes to settle
-- Weather is 60% clear / 20% rain / 20% thunder, applied instantly via `server.setWeatherParameters` (direct API, no
-  commands)
-- Time advances +20 s per shot from a random base, so no two shots share the same lighting
-
-Full pass over all 87 mobs ≈ **17 400 labelled frames** in ~92 minutes unattended.
-
-**HUD** - a top-center panel shows phase, mob, total frames, time, shot/setup progress, segmented weather schedule,
-mapped biome count, terrain/preload status, global progress bar, and ETA. Action-bar text (above hotbar) shows compact
-live shot info.
-Neither HUD element appears in screenshots.
-
----
-
 ## Class map
 
-87 classes. IDs are assigned by list order in `ClassMap.kt` - never reorder.
+87 classes. IDs are assigned by list order in `ClassMap.kt` - never reorder existing entries.
 
 | ID | Entity           | Category   |
 |----|------------------|------------|
@@ -221,125 +183,3 @@ Neither HUD element appears in screenshots.
 | 84 | Ender Dragon     | Boss/Other |
 | 85 | Giant            | Boss/Other |
 | 86 | Wither           | Boss/Other |
-
-### `data.yaml`
-
-```yaml
-path: dataset
-train: images
-val: images
-
-nc: 87
-names:
-  0: blaze
-  1: bogged
-  2: breeze
-  3: cave_spider
-  4: creaking
-  5: creeper
-  6: drowned
-  7: elder_guardian
-  8: enderman
-  9: endermite
-  10: evoker
-  11: ghast
-  12: guardian
-  13: hoglin
-  14: husk
-  15: illusioner
-  16: magma_cube
-  17: parched
-  18: phantom
-  19: piglin
-  20: piglin_brute
-  21: pillager
-  22: ravager
-  23: shulker
-  24: silverfish
-  25: skeleton
-  26: slime
-  27: spider
-  28: stray
-  29: vex
-  30: vindicator
-  31: warden
-  32: witch
-  33: wither_skeleton
-  34: zoglin
-  35: zombie
-  36: zombie_villager
-  37: zombified_piglin
-  38: bee
-  39: dolphin
-  40: goat
-  41: iron_golem
-  42: llama
-  43: panda
-  44: polar_bear
-  45: strider
-  46: trader_llama
-  47: wolf
-  48: allay
-  49: armadillo
-  50: axolotl
-  51: bat
-  52: camel
-  53: camel_husk
-  54: cat
-  55: chicken
-  56: cod
-  57: cow
-  58: donkey
-  59: fox
-  60: frog
-  61: glow_squid
-  62: happy_ghast
-  63: horse
-  64: mooshroom
-  65: mule
-  66: nautilus
-  67: ocelot
-  68: parrot
-  69: pig
-  70: pufferfish
-  71: rabbit
-  72: salmon
-  73: sheep
-  74: skeleton_horse
-  75: sniffer
-  76: snow_golem
-  77: squid
-  78: tadpole
-  79: tropical_fish
-  80: turtle
-  81: zombie_horse
-  82: zombie_nautilus
-  83: copper_golem
-  84: ender_dragon
-  85: giant
-  86: wither
-```
-
----
-
-## Tuning
-
-All constants are `internal const val` in `AutoCapture.kt` except where noted.
-
-| Constant                  | Default      | Effect                                                               |
-|---------------------------|--------------|----------------------------------------------------------------------|
-| `BIOME_PREMAP_STEP`       | `64`         | Setup-time grid step for distinct biome pre-map                      |
-| `BIOME_SCAN_RADIUS`       | `2000`       | Half-size of biome search grid (blocks)                              |
-| `CAPTURE_EVERY_N_FRAMES`  | `20`         | Frames between captures in manual mode (`DatasetCapture.kt`)         |
-| `CROP_X / CROP_Y`         | `384 / 216`  | 30% crop offset; final output is **512×288** (`DatasetCapture.kt`)   |
-| Min box size              | `5 px`       | Smaller projected boxes are discarded; also re-checked post-crop     |
-| `MOB_SPAWN_TICK`          | `45`         | Tick within setup when mob is summoned                               |
-| `RELOCATE_EVERY`          | `10`         | Shots between biome relocations                                      |
-| `SETUP_WAIT_TICKS`        | `70`         | Ticks before capture starts (chunk load buffer)                      |
-| `SHOTS_PER_MOB`           | `200`        | Screenshots per mob                                                  |
-| `TARGET_W / TARGET_H`     | `1280 × 720` | Scale-to dimensions before crop (`DatasetCapture.kt`)                |
-| `TERRAIN_POST_SNAP_TICKS` | `15`         | Extra ticks after mob surface-snap before orbit shots begin          |
-| `TERRAIN_WAIT_TICKS`      | `30`         | Ticks to wait after teleporting player to a relocation position      |
-| `TIER_SIZE`               | `25`         | Shots per orbit tier; tiers 3+ all use the top-down pattern          |
-| `TIME_PER_SHOT`           | `400` ticks  | In-game time advance per shot (+20 s)                                |
-| `WeatherPhase` fractions  | 60 / 20 / 20 | Clear / rain / thunder share (%) of `SHOTS_PER_MOB`; defined in enum |
