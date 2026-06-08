@@ -96,21 +96,28 @@ When started, the bot prints its current settings to chat and loops indefinitely
 **SETUP phase** (70 ticks minimum, ~3.5 s):
 
 1. Kill previous generated entities and nearby mobs, switch to spectator mode
-2. Pick random XZ (±500 blocks), pre-map distinct biome relocation candidates in a ±600-block grid, and teleport to Y=200 to load terrain
-3. From tick 45: wait until the target chunk is loaded, land on the real surface, summon one tagged NoAI random mob, then snap it to the loaded surface
+2. Pick random XZ (±500 blocks), pre-map distinct biome relocation candidates in a ±600-block grid, and teleport to
+   Y=200 to load terrain
+3. From tick 45: wait until the target chunk is loaded, land on the real surface, summon one tagged NoAI random mob,
+   then snap it to the loaded surface
 
-**CAPTURING phase** (100 shots, 3 ticks each, ~15 s):
+**CAPTURING phase** (200 shots, 3 ticks each, ~30 s):
 
-- Each shot: teleport player to an orbit position, wait for the server round-trip, capture
-- 4 orbit tiers: close-ground (3.5–8 blk), mid (7–13 blk), far (11–19 blk), top-down
-- Every 10 shots: use the shuffled pre-mapped biome pool, pre-load the target chunk, then teleport the tagged mob to the loaded surface
-- Shots 0–59: clear weather | 60–79: rain | 80–99: thunder, applied instantly through the integrated server when available
+- Each shot: teleport player to an orbit position, recompute yaw/pitch toward mob, capture
+- 4 orbit tiers (TIER_SIZE=25): close-ground (2.5–5.5 blk dist, 0.3–1.5 blk height), mid (5–9 blk, 1.2–4 blk), far (8–14
+  blk, 3.5–8 blk), then top-down (2–5 blk dist, 8–14 blk height) for all remaining shots
+- Every 10 shots: pull next entry from the pre-mapped biome pool (6 temperature buckets:
+  frozen/cold/cool/temperate/warm/hot, always cycling away from the current bucket), pre-load the target chunk async,
+  teleport mob, wait `TERRAIN_POST_SNAP_TICKS` for meshes to settle
+- Weather is 60% clear / 20% rain / 20% thunder, applied instantly via `server.setWeatherParameters` (direct API, no
+  commands)
 - Time advances +20 s per shot from a random base, so no two shots share the same lighting
 
-Full pass over all 87 mobs ≈ **8700 labelled frames** in ~22 minutes unattended.
+Full pass over all 87 mobs ≈ **17 400 labelled frames** in ~92 minutes unattended.
 
-**HUD** - a top-center panel shows phase, mob, total frames, time, shot/setup progress, weather schedule, relocation batch
-ticks, mapped biome count, and terrain/preload status. Action-bar text (above hotbar) shows compact live shot info.
+**HUD** - a top-center panel shows phase, mob, total frames, time, shot/setup progress, segmented weather schedule,
+mapped biome count, terrain/preload status, global progress bar, and ETA. Action-bar text (above hotbar) shows compact
+live shot info.
 Neither HUD element appears in screenshots.
 
 ---
@@ -313,17 +320,19 @@ names:
 
 All constants are `internal const val` in `AutoCapture.kt` except where noted.
 
-| Constant                     | Default      | Effect                                                       |
-|------------------------------|--------------|--------------------------------------------------------------|
-| `SHOTS_PER_MOB`              | `100`        | Screenshots per mob                                          |
-| `SHOTS_CLEAR` / `SHOTS_RAIN` | `60` / `20`  | Weather distribution; thunder = remainder                    |
-| `SETUP_WAIT_TICKS`           | `70`         | Ticks before capture starts (chunk load buffer)              |
-| `MOB_SPAWN_TICK`             | `45`         | Tick within setup when mob is summoned                       |
-| `TIME_PER_SHOT`              | `400` ticks  | In-game time advance per shot (+20 s)                        |
-| `RELOCATE_EVERY`             | `10`         | Shots between biome relocations                              |
-| `BIOME_SCAN_RADIUS`          | `600`        | Half-size of biome search grid (blocks)                      |
-| `BIOME_PREMAP_STEP`          | `64`         | Setup-time grid step for distinct biome pre-map              |
-| `BIOME_SCAN_STEP`            | `32`         | Fallback grid step if the pre-map has no valid candidate     |
-| `CAPTURE_EVERY_N_FRAMES`     | `20`         | Frames between captures in manual mode (`DatasetCapture.kt`) |
-| `TARGET_W / TARGET_H`        | `1280 × 720` | Output resolution (`DatasetCapture.kt`)                      |
-| Min box size                 | `5 px`       | Smaller projected boxes are discarded (`Projector.kt`)       |
+| Constant                  | Default      | Effect                                                               |
+|---------------------------|--------------|----------------------------------------------------------------------|
+| `SHOTS_PER_MOB`           | `200`        | Screenshots per mob                                                  |
+| `WeatherPhase` fractions  | 60 / 20 / 20 | Clear / rain / thunder share (%) of `SHOTS_PER_MOB`; defined in enum |
+| `SETUP_WAIT_TICKS`        | `70`         | Ticks before capture starts (chunk load buffer)                      |
+| `MOB_SPAWN_TICK`          | `45`         | Tick within setup when mob is summoned                               |
+| `TERRAIN_WAIT_TICKS`      | `30`         | Ticks to wait after teleporting player to a relocation position      |
+| `TERRAIN_POST_SNAP_TICKS` | `15`         | Extra ticks after mob surface-snap before orbit shots begin          |
+| `TIME_PER_SHOT`           | `400` ticks  | In-game time advance per shot (+20 s)                                |
+| `RELOCATE_EVERY`          | `10`         | Shots between biome relocations                                      |
+| `BIOME_SCAN_RADIUS`       | `2000`       | Half-size of biome search grid (blocks)                              |
+| `BIOME_PREMAP_STEP`       | `64`         | Setup-time grid step for distinct biome pre-map                      |
+| `TIER_SIZE`               | `25`         | Shots per orbit tier; tiers 3+ all use the top-down pattern          |
+| `CAPTURE_EVERY_N_FRAMES`  | `20`         | Frames between captures in manual mode (`DatasetCapture.kt`)         |
+| `TARGET_W / TARGET_H`     | `1280 × 720` | Output resolution (`DatasetCapture.kt`)                              |
+| Min box size              | `5 px`       | Smaller projected boxes are discarded (`Projector.kt`)               |
