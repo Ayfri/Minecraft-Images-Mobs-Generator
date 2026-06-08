@@ -353,7 +353,6 @@ data object AutoCapture {
 	internal fun stop(mc: Minecraft) {
 		running = false; phase = Phase.IDLE
 		DatasetCapture.autoMode = true
-		mc.player?.connection?.sendCommand("gamemode survival")
 		mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] §fStopped - $mobIndex mobs, $totalShots shots captured"))
 	}
 
