@@ -33,6 +33,11 @@ fun EntityRenderState.toYoloBox(camera: CameraRenderState, screenW: Int, screenH
     val camY = camera.pos.y.toFloat()
     val camZ = camera.pos.z.toFloat()
 
+    val dx = ex - camX
+    val dy = (ey + eh / 2f) - camY
+    val dz = ez - camZ
+    val dist = kotlin.math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
+
     var minSX = Float.MAX_VALUE
     var minSY = Float.MAX_VALUE
     var maxSX = -Float.MAX_VALUE
@@ -69,5 +74,6 @@ fun EntityRenderState.toYoloBox(camera: CameraRenderState, screenW: Int, screenH
         (minSY + bh / 2f) / screenH,
         bw / screenW,
         bh / screenH,
+        dist,
     )
 }
