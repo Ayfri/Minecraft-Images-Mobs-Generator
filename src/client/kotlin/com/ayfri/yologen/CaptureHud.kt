@@ -75,7 +75,7 @@ fun registerHud() {
 		val ticksPerMob = AutoCapture.SETUP_WAIT_TICKS +
 			AutoCapture.SHOTS_PER_MOB * 3 +
 			(AutoCapture.SHOTS_PER_MOB / AutoCapture.RELOCATE_EVERY) * AutoCapture.TERRAIN_WAIT_TICKS
-		val mobsLeft = MOB_TYPES.size - AutoCapture.mobIndex
+		val mobsLeft = MOB_TYPES.size - AutoCapture.completedCount - 1
 		val shotsLeft = AutoCapture.SHOTS_PER_MOB - AutoCapture.shotCount
 		val ticksLeft = mobsLeft * ticksPerMob + shotsLeft * 3
 		val secsLeft = ticksLeft / 20
@@ -101,7 +101,7 @@ fun registerHud() {
 		val mobText = if (AutoCapture.currentMobName.isEmpty())
 			"waiting for tagged NoAI mob spawn"
 		else
-			"mob ${AutoCapture.mobIndex}/${MOB_TYPES.size}: ${AutoCapture.currentMobName}"
+			"mob ${AutoCapture.completedCount + 1}/${MOB_TYPES.size}: ${AutoCapture.currentMobName}"
 		g.text(font, mobText, x + 10, y, TEXT_MAIN)
 		val hour = (AutoCapture.currentTime / 1000L + 6L) % 24L
 		g.textRight(font, "%02d:00".format(hour), x + panelW - 10, y, TEXT_DIM)
@@ -170,10 +170,8 @@ fun registerHud() {
 
 		// Global progress bar
 		val totalShotsAll = MOB_TYPES.size * AutoCapture.SHOTS_PER_MOB
-		val shotsDoneGlobal =
-			((AutoCapture.mobIndex - 1).coerceAtLeast(0) * AutoCapture.SHOTS_PER_MOB + AutoCapture.shotCount).coerceAtMost(
-				totalShotsAll
-			)
+		val shotsDoneGlobal = (AutoCapture.completedCount * AutoCapture.SHOTS_PER_MOB + AutoCapture.shotCount)
+			.coerceAtMost(totalShotsAll)
 		val globalFilled = barW * shotsDoneGlobal / totalShotsAll
 		g.fill(barX, y, barX + barW, y + barH, GLOBAL_BAR_BG)
 		if (globalFilled > 0) g.fill(barX, y, barX + globalFilled, y + barH, GLOBAL_BAR_FG)

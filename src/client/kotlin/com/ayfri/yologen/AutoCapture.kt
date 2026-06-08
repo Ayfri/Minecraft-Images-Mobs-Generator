@@ -63,6 +63,7 @@ data object AutoCapture {
 	internal const val TIER_SIZE = 25
 	internal const val TIME_PER_SHOT = 400L
 
+	internal var completedCount = 0
 	internal var currentMobName = ""
 	internal var currentTime = 0L
 	internal var currentWeather = "clear"
@@ -73,6 +74,7 @@ data object AutoCapture {
 	internal var shotCount = 0
 	internal var terrainWaitTick = 0
 	internal var totalShots = 0
+	private var completedMobs = emptySet<String>()
 	private var baseTime = 0L
 	private var subTick = 0
 	internal val hasNextRelocation get() = nextRelocation != null
@@ -105,7 +107,7 @@ data object AutoCapture {
 	private var poolBiomeMap = mutableMapOf<ResourceKey<Biome>, BiomeRelocation>()
 	private var poolBuildDone = false
 
-	// Background pool preloader — warms up server chunks for all relocation destinations.
+	// Background pool preloader - warms up server chunks for all relocation destinations.
 	private var poolPreloadIdx = 0
 
 	private data class PoolGridPos(val worldX: Int, val worldZ: Int)
@@ -114,7 +116,10 @@ data object AutoCapture {
 
 	private data class BiomeRelocation(val biome: ResourceKey<Biome>, val x: Double, val z: Double, val tempBucket: Int)
 
-	private val mobTypes = YOLO_CLASS_MAP.keys.toList()
+	private fun mobRegName(idx: Int) = BuiltInRegistries.ENTITY_TYPE.getKey(MOB_TYPES[idx]).toString()
+	private fun findNextMob(done: Set<String>) = MOB_TYPES.indexOfFirst {
+		BuiltInRegistries.ENTITY_TYPE.getKey(it).toString().substringAfter(':') !in done
+	}
 
 	private fun Double.fmt(decimals: Int = 2) = String.format(Locale.ROOT, "%.${decimals}f", this)
 	private fun Int.toChunkCoord() = floorDiv(16)
@@ -142,7 +147,7 @@ data object AutoCapture {
 		return server.getLevel(dimension)
 	}
 
-	// Forces server chunks asynchronously — posts to server thread to avoid client-tick freeze.
+	// Forces server chunks asynchronously - posts to server thread to avoid client-tick freeze.
 	private fun forceServerChunksAround(mc: Minecraft, x: Int, z: Int, radius: Int = PRELOAD_CHUNK_RADIUS) {
 		val server = mc.singleplayerServer ?: return
 		val dimension = mc.level?.dimension() ?: Level.OVERWORLD
@@ -156,7 +161,7 @@ data object AutoCapture {
 		}
 	}
 
-	// Warms up server chunks for the next unvisited pool entry — 1 per tick, radius=1.
+	// Warms up server chunks for the next unvisited pool entry - 1 per tick, radius=1.
 	private fun advancePoolPreload(mc: Minecraft) {
 		if (!poolBuildDone || relocationPool.isEmpty()) return
 		if (poolPreloadIdx < relocationPool.size) {
@@ -440,7 +445,7 @@ data object AutoCapture {
 		safeY = surfY
 		teleportPlayer(mc, baseX.toDouble(), surfY, baseZ.toDouble())
 
-		val mobType = mobTypes.random()
+		val mobType = MOB_TYPES[mobIndex]
 		currentMobEntityType = mobType
 		currentMobRegName = BuiltInRegistries.ENTITY_TYPE.getKey(mobType).toString()
 		currentMobName = currentMobRegName.substringAfter(':')
@@ -495,18 +500,33 @@ data object AutoCapture {
 	}
 
 	internal fun start(mc: Minecraft) {
+		completedMobs = ProgressStore.load(mc)
+		val nextIdx = findNextMob(completedMobs)
+		if (nextIdx == -1) {
+			mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAll ${MOB_TYPES.size} mobs already captured. Use §7/yoloclear §fto reset."))
+			return
+		}
+		mobIndex = nextIdx
+		completedCount = completedMobs.size
 		running = true; phase = Phase.SETUP; setupTick = 0
-		mobIndex = 0; totalShots = 0
+		totalShots = completedMobs.size * SHOTS_PER_MOB
 		safeY = mc.player?.y ?: 64.0
 		DatasetCapture.autoMode = false
+		DatasetCapture.resumeFrom(ProgressStore.resumeCaptureIndex(mc))
 		resetMobState()
 		savedFov = mc.options.fov().get()
 		mc.options.fov().set(70)
 
 		val wDesc = WeatherPhase.entries.joinToString(" ") { "${it.pct}%${it.label.first()}" }
-		mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAuto-capture started §8- §7/yolostop  /yoloclear"))
+		val resumeMsg = if (completedMobs.isNotEmpty()) " §8(resuming from §f${mobRegName(nextIdx).substringAfter(':')}§8, ${completedMobs.size}/${MOB_TYPES.size} done)" else ""
+		mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAuto-capture started$resumeMsg §8- §7/yolostop  /yoloclear"))
 		mc.player?.sendSystemMessage(Component.literal("§8  shots/mob: §f$SHOTS_PER_MOB §8| weather: §f$wDesc §8| time: §f+${TIME_PER_SHOT / 20}s/shot"))
 		mc.player?.sendSystemMessage(Component.literal("§8  relocate every §f$RELOCATE_EVERY §8shots | biome pre-map §f±${BIOME_SCAN_RADIUS}blk §8step §f$BIOME_PREMAP_STEP §8| §f${MOB_TYPES.size} §8mob types"))
+	}
+
+	internal fun onClear() {
+		completedMobs = emptySet()
+		completedCount = 0
 	}
 
 	internal fun stop(mc: Minecraft) {
@@ -531,7 +551,7 @@ data object AutoCapture {
 			val hour = (currentTime / 1000L + 6L) % 24L
 			mc.gui.setOverlayMessage(
 				Component.literal(
-					"$icon §f$currentMobName §8| §7shot ${shotCount + 1}/$SHOTS_PER_MOB §8| §7mob $mobIndex/${MOB_TYPES.size} §8| §7%02d:00".format(
+					"$icon §f$currentMobName §8| §7shot ${shotCount + 1}/$SHOTS_PER_MOB §8| §7mob ${completedCount + 1}/${MOB_TYPES.size} §8| §7%02d:00".format(
 						hour
 					)
 				),
@@ -574,7 +594,7 @@ data object AutoCapture {
 				}
 
 				if (++setupTick >= SETUP_WAIT_TICKS && mobSpawned && pendingMobSurfaceSnap == null) {
-					setupTick = 0; mobIndex++; phase = Phase.CAPTURING
+					setupTick = 0; phase = Phase.CAPTURING
 				}
 			}
 
@@ -650,7 +670,17 @@ data object AutoCapture {
 							totalShots++
 						}
 						if (++shotCount >= SHOTS_PER_MOB) {
-							phase = Phase.SETUP; setupTick = 0
+							ProgressStore.markCompleted(mc, currentMobName)
+							completedMobs = completedMobs + currentMobName
+							completedCount = completedMobs.size
+							val nextIdx = findNextMob(completedMobs)
+							if (nextIdx == -1) {
+								mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAll ${MOB_TYPES.size} mobs completed! $totalShots total shots."))
+								stop(mc)
+							} else {
+								mobIndex = nextIdx
+								phase = Phase.SETUP; setupTick = 0
+							}
 						}
 						subTick = 0
 					}

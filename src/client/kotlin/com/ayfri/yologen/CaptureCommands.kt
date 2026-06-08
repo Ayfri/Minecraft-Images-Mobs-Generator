@@ -38,6 +38,7 @@ fun registerCommands() {
 }
 
 private fun clearDataset(mc: Minecraft) {
+	if (AutoCapture.running) AutoCapture.stop(mc)
 	val dir = File(mc.gameDirectory, "dataset")
 	if (!dir.exists()) {
 		mc.player?.sendSystemMessage(Component.literal("§e[YoloGen] No dataset folder found."))
@@ -47,7 +48,8 @@ private fun clearDataset(mc: Minecraft) {
 		val count = dir.walkTopDown().count { it.isFile }
 		dir.deleteRecursively()
 		mc.execute {
-			mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] Deleted $count files from dataset/"))
+			AutoCapture.onClear()
+			mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] Deleted $count files from dataset/ - progress reset."))
 		}
 	}
 	mc.player?.sendSystemMessage(Component.literal("§e[YoloGen] Clearing dataset in background…"))

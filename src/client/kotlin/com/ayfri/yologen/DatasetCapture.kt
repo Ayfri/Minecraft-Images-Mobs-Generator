@@ -49,7 +49,11 @@ data object DatasetCapture {
 	var pendingCaptureMetadata: CaptureMetadata? = null
 
 	private var frameCount = 0
-	private var captureIndex = 0
+	internal var captureIndex = 0
+
+	internal fun resumeFrom(index: Int) {
+		captureIndex = index
+	}
 
 	private val ioExecutor = Executors.newFixedThreadPool(4) { r ->
 		Thread(r, "yologen-io").also { it.isDaemon = true }
