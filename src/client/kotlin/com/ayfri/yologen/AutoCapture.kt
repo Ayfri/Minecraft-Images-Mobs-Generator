@@ -7,7 +7,6 @@ import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.core.registries.Registries
 import net.minecraft.network.chat.Component
 import net.minecraft.resources.ResourceKey
-import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.clock.WorldClocks
 import net.minecraft.world.effect.MobEffectInstance
@@ -15,6 +14,7 @@ import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.entity.EntitySpawnReason
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.Mob
+import net.minecraft.world.entity.Relative
 import net.minecraft.world.level.ClipContext
 import net.minecraft.world.level.GameType
 import net.minecraft.world.level.Level
@@ -47,6 +47,21 @@ internal enum class WeatherPhase(val label: String, val fraction: Float) {
 	}
 }
 
+// Extension so ClassMap stays import-free
+private val MobDimension.levelKey: ResourceKey<Level>
+	get() = when (this) {
+		MobDimension.OVERWORLD -> Level.OVERWORLD
+		MobDimension.NETHER -> Level.NETHER
+		MobDimension.END -> Level.END
+	}
+
+private val MobDimension.label: String
+	get() = when (this) {
+		MobDimension.OVERWORLD -> "OW"
+		MobDimension.NETHER -> "Nether"
+		MobDimension.END -> "End"
+	}
+
 data object AutoCapture {
 	internal const val BIOME_SCAN_RADIUS = 2000
 	private const val BIOME_PREMAP_STEP = 64
@@ -54,6 +69,7 @@ data object AutoCapture {
 	internal const val MOB_SPAWN_TICK = 45
 	private const val PRELOAD_CHUNK_RADIUS = 2
 	private const val PRELOAD_HEIGHT = 200.0
+	private const val NETHER_PRELOAD_HEIGHT = 80.0
 	internal const val RELOCATE_EVERY = 10
 	internal const val SETUP_WAIT_TICKS = 70
 	internal const val SHOTS_PER_MOB = 200
@@ -80,6 +96,11 @@ data object AutoCapture {
 	internal val hasNextRelocation get() = nextRelocation != null
 	internal val relocationPoolSize get() = relocationPool.size
 
+	// Dimension phase tracking - resets per mob, increments per dimension phase
+	internal var currentDimension = MobDimension.OVERWORLD
+	private var currentDimensionKey: ResourceKey<Level> = Level.OVERWORLD
+	internal var dimensionPhaseIndex = 0
+
 	private var baseX = 0
 	private var baseZ = 0
 	private var mobX = 0.0
@@ -95,21 +116,22 @@ data object AutoCapture {
 	private var nextRelocation: Pair<Double, Double>? = null
 	private var pendingMobSurfaceSnap: Pair<Double, Double>? = null
 	private var relocationCursor = 0
+
 	@Volatile
 	private var relocationPool = emptyList<BiomeRelocation>()
 	private var targetBucket = 0
 	private var targetPitch = 0f
 	private var targetYaw = 0f
 
-	// Incremental pool build - scans already-loaded chunks to avoid blocking chunk generation.
+	// Incremental pool build
 	private const val POOL_BUILD_BATCH = 20
 	private var poolBuildQueue = emptyList<PoolGridPos>()
 	private var poolBuildIndex = 0
 	private var poolBiomeMap = mutableMapOf<ResourceKey<Biome>, BiomeRelocation>()
+
 	@Volatile
 	private var poolBuildDone = false
 
-	// Background pool preloader - warms up server chunks for all relocation destinations.
 	private var poolPreloadIdx = 0
 
 	private data class PoolGridPos(val worldX: Int, val worldZ: Int)
@@ -118,15 +140,21 @@ data object AutoCapture {
 
 	private data class BiomeRelocation(val biome: ResourceKey<Biome>, val x: Double, val z: Double, val tempBucket: Int)
 
-	private fun mobRegName(idx: Int) = BuiltInRegistries.ENTITY_TYPE.getKey(MOB_TYPES[idx]).toString()
-	private fun findNextMob(done: Set<String>) = MOB_TYPES.indexOfFirst {
-		BuiltInRegistries.ENTITY_TYPE.getKey(it).toString().substringAfter(':') !in done
+	private fun mobRegName(idx: Int) = BuiltInRegistries.ENTITY_TYPE.getKey(MOB_ENTRIES[idx].entityType).toString()
+	private fun findNextMob(done: Set<String>) = MOB_ENTRIES.indexOfFirst {
+		BuiltInRegistries.ENTITY_TYPE.getKey(it.entityType).toString().substringAfter(':') !in done
 	}
 
 	private fun Double.fmt(decimals: Int = 2) = String.format(Locale.ROOT, "%.${decimals}f", this)
 	private fun Int.toChunkCoord() = floorDiv(16)
 
-	// Temperature → climate bucket: 0=frozen, 1=cold, 2=cool, 3=temperate, 4=warm, 5=hot
+	// Shot count at which the current dimension phase ends
+	private fun shotLimitForPhase(phaseIdx: Int, numDims: Int): Int {
+		val base = SHOTS_PER_MOB / numDims
+		return if (phaseIdx == numDims - 1) SHOTS_PER_MOB else base * (phaseIdx + 1)
+	}
+
+	// Temperature → climate bucket
 	private fun tempBucket(temp: Float) = when {
 		temp < 0.0f -> 0
 		temp < 0.3f -> 1
@@ -143,21 +171,18 @@ data object AutoCapture {
 	private fun serverPlayer(mc: Minecraft): ServerPlayer? =
 		mc.singleplayerServer?.playerList?.players?.firstOrNull()
 
-	// Forces server chunks asynchronously - posts to server thread to avoid client-tick freeze.
 	private fun forceServerChunksAround(mc: Minecraft, x: Int, z: Int, radius: Int = PRELOAD_CHUNK_RADIUS) {
 		val server = mc.singleplayerServer ?: return
-		val dimension = mc.level?.dimension() ?: Level.OVERWORLD
 		val cx = x.toChunkCoord()
 		val cz = z.toChunkCoord()
 		server.execute {
-			val sLevel = server.getLevel(dimension) ?: return@execute
+			val sLevel = server.getLevel(currentDimensionKey) ?: return@execute
 			for (dx in -radius..radius)
 				for (dz in -radius..radius)
 					sLevel.chunkSource.getChunk(cx + dx, cz + dz, ChunkStatus.FULL, true)
 		}
 	}
 
-	// Warms up server chunks for the next unvisited pool entry - 1 per tick, radius=1.
 	private fun advancePoolPreload(mc: Minecraft) {
 		if (!poolBuildDone || relocationPool.isEmpty()) return
 		if (poolPreloadIdx < relocationPool.size) {
@@ -166,7 +191,6 @@ data object AutoCapture {
 		}
 	}
 
-	// Sets day-time via ServerClockManager - the new 26.1 time system.
 	private fun applyInstantTime(mc: Minecraft, time: Long) {
 		val server = mc.singleplayerServer
 		if (server != null) {
@@ -199,7 +223,6 @@ data object AutoCapture {
 		mc.player?.connection?.sendCommand("weather $weather")
 	}
 
-	// Teleports the server-side player (preserves rotation, produces no log).
 	private fun teleportPlayer(mc: Minecraft, x: Double, y: Double, z: Double) {
 		val server = mc.singleplayerServer
 		if (server != null) {
@@ -211,26 +234,59 @@ data object AutoCapture {
 		}
 	}
 
-	// Teleports player to PRELOAD_HEIGHT above target and forces surrounding chunks.
-	private fun preloadPosition(mc: Minecraft, x: Double, z: Double) {
-		forceServerChunksAround(mc, x.toInt(), z.toInt())
-		teleportPlayer(mc, x, PRELOAD_HEIGHT, z)
+	// Cross-dimension teleport - also used to stay in the same dim when already there.
+	private fun teleportPlayerToDimension(mc: Minecraft, x: Double, y: Double, z: Double) {
+		val server = mc.singleplayerServer
+		if (server != null) {
+			server.execute {
+				val sp = serverPlayer(mc) ?: return@execute
+				val targetLevel = server.getLevel(currentDimensionKey) ?: return@execute
+				if (sp.level().dimension() == currentDimensionKey) {
+					sp.teleportTo(x, y, z)
+				} else {
+					sp.teleportTo(targetLevel, x, y, z, emptySet<Relative>(), sp.yRot, sp.xRot, false)
+				}
+			}
+		} else {
+			mc.player?.connection?.sendCommand("tp @s ${x.fmt()} ${y.fmt()} ${z.fmt()}")
+		}
 	}
 
-	// Discards any tagged mob and spawns a fresh one at (x, y, z) - no /summon command or log.
-	// Must run on the server thread (C2ME enforces thread-safe entity management).
+	private fun preloadPosition(mc: Minecraft, x: Double, z: Double) {
+		val preloadY = if (currentDimension == MobDimension.NETHER) NETHER_PRELOAD_HEIGHT else PRELOAD_HEIGHT
+		forceServerChunksAround(mc, x.toInt(), z.toInt())
+		teleportPlayerToDimension(mc, x, preloadY, z)
+	}
+
+	// Clears fire on all tagged entities - prevents visual burn for undead mobs in daylight.
+	private fun clearMobFire(mc: Minecraft) {
+		val server = mc.singleplayerServer ?: return
+		server.execute {
+			val sLevel = server.getLevel(currentDimensionKey) ?: return@execute
+			sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.clearFire() }
+		}
+	}
+
 	private fun spawnMobEntity(mc: Minecraft, x: Double, y: Double, z: Double) {
 		val server = mc.singleplayerServer ?: return
-		val dimension = mc.level?.dimension() ?: Level.OVERWORLD
 		server.execute {
-			val sLevel = server.getLevel(dimension) ?: return@execute
+			val sLevel = server.getLevel(currentDimensionKey) ?: return@execute
 			sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
 			val entity = currentMobEntityType?.create(sLevel, EntitySpawnReason.COMMAND) ?: return@execute
 			entity.snapTo(x, y, z, 0f, 0f)
 			entity.isInvulnerable = true
 			entity.clearFire()
 			(entity as? Mob)?.isNoAi = true
-			(entity as? LivingEntity)?.addEffect(MobEffectInstance(MobEffects.FIRE_RESISTANCE, -1, 0, false, false, false))
+			(entity as? LivingEntity)?.addEffect(
+				MobEffectInstance(
+					MobEffects.FIRE_RESISTANCE,
+					-1,
+					0,
+					false,
+					false,
+					false
+				)
+			)
 			entity.addTag(MOB_TAG)
 			sLevel.addFreshEntity(entity)
 		}
@@ -255,14 +311,12 @@ data object AutoCapture {
 		poolBuildDone = false
 	}
 
-	// Called every tick - only reads already-loaded chunks, never forces generation.
 	private fun advancePoolBuild(mc: Minecraft) {
 		if (poolBuildDone) return
 		val server = mc.singleplayerServer ?: run { poolBuildDone = true; return }
-		val dimension = mc.level?.dimension() ?: Level.OVERWORLD
 		server.execute {
 			if (poolBuildDone) return@execute
-			val level = server.getLevel(dimension) ?: return@execute
+			val level = server.getLevel(currentDimensionKey) ?: return@execute
 			var done = 0
 			while (done < POOL_BUILD_BATCH && poolBuildIndex < poolBuildQueue.size) {
 				val pos = poolBuildQueue[poolBuildIndex]
@@ -296,16 +350,33 @@ data object AutoCapture {
 
 	// ── Surface helpers ───────────────────────────────────────────────────────
 
-	// Returns a position near (centerX, centerZ) that is not under a tree canopy.
+	// In the Nether the heightmap returns the bedrock ceiling (Y=127), not the floor.
+	// Scan downward from Y=100 to find the actual floor surface.
+	private fun netherFloorY(mc: Minecraft, x: Int, z: Int): Double {
+		val level = mc.level ?: return 40.0
+		for (y in 100 downTo 5) {
+			if (!level.getBlockState(BlockPos(x, y, z)).isAir && level.getBlockState(BlockPos(x, y + 1, z)).isAir) {
+				return (y + 1).toDouble()
+			}
+		}
+		return 40.0
+	}
+
 	private fun findClearPos(mc: Minecraft, centerX: Double, centerZ: Double, radius: Int = 30): Pair<Double, Double> {
 		val level = mc.level ?: return centerX to centerZ
 		for (i in 0 until 25) {
 			val x = centerX + Random.nextInt(-radius, radius + 1)
 			val z = centerZ + Random.nextInt(-radius, radius + 1)
 			if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) continue
-			val blocking = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x.toInt(), z.toInt())
-			val noLeaves = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x.toInt(), z.toInt())
-			if (blocking <= noLeaves + 1) return x to z
+			if (currentDimension == MobDimension.NETHER) {
+				// In Nether just verify the position has a solid floor
+				val floorY = netherFloorY(mc, x.toInt(), z.toInt())
+				if (floorY > 5.0) return x to z
+			} else {
+				val blocking = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x.toInt(), z.toInt())
+				val noLeaves = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x.toInt(), z.toInt())
+				if (blocking <= noLeaves + 1) return x to z
+			}
 		}
 		return centerX to centerZ
 	}
@@ -313,24 +384,28 @@ data object AutoCapture {
 	private fun loadedSurfaceY(mc: Minecraft, x: Int, z: Int): Double? {
 		val level = mc.level ?: return null
 		if (!level.isLoaded(BlockPos(x, 0, z))) return null
-		return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z).toDouble()
+		return if (currentDimension == MobDimension.NETHER) netherFloorY(mc, x, z)
+		else level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z).toDouble()
 	}
 
-	// Uses MOTION_BLOCKING (includes leaves) so the camera sits above the canopy, not inside it.
+	// Uses MOTION_BLOCKING (includes leaves) so the camera sits above the canopy.
 	private fun safeSurfaceY(mc: Minecraft, x: Int, z: Int): Double {
 		val level = mc.level ?: return safeY
 		if (!level.isLoaded(BlockPos(x, 0, z))) return safeY
-		val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z).toDouble()
-		return if (y < 60.0) safeY else y
+		return if (currentDimension == MobDimension.NETHER) {
+			netherFloorY(mc, x, z).also { if (it < 5.0) return safeY }
+		} else {
+			val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z).toDouble()
+			if (y < 60.0) safeY else y
+		}
 	}
 
-	// Snaps the mob to the loaded client surface. Returns false if chunk not ready yet.
 	private fun snapMobToLoadedSurface(mc: Minecraft, x: Double, z: Double): Boolean {
 		val level = mc.level ?: return false
 		forceServerChunksAround(mc, x.toInt(), z.toInt(), radius = 1)
 		if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) return false
 		val (clearX, clearZ) = findClearPos(mc, x, z)
-		val y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, clearX.toInt(), clearZ.toInt()).toDouble()
+		val y = loadedSurfaceY(mc, clearX.toInt(), clearZ.toInt()) ?: return false
 		if (mc.singleplayerServer != null) {
 			spawnMobEntity(mc, clearX, y, clearZ)
 		} else {
@@ -369,7 +444,6 @@ data object AutoCapture {
 		val currentBucket = currentBiomeHolder?.value()?.baseTemperature?.let { tempBucket(it) } ?: -1
 
 		if (relocationPool.isNotEmpty()) {
-			// Cycle through climate buckets, always skipping the current zone
 			for (offset in 0 until TEMP_BUCKETS) {
 				val bucket = (targetBucket + offset) % TEMP_BUCKETS
 				if (bucket == currentBucket) continue
@@ -393,22 +467,22 @@ data object AutoCapture {
 
 	// ── Orbit + rotation ──────────────────────────────────────────────────────
 
-	// Tier-based orbit: tiers 0-5 favour side/angled views; tiers 6+ (else) are top-down.
-	// With TIER_SIZE=25 and SHOTS_PER_MOB=200: 150 side shots (75%) + 50 top-down (25%).
+	// Tier-based orbit. Angle uses RELOCATE_EVERY so each 10-shot burst sweeps ~360°.
 	// Tier 0: close ground  Tier 1: medium low  Tier 2: far moderate
 	// Tier 3: close side    Tier 4: medium mid  Tier 5: far low    Tier 6+: top-down
 	private fun orbitParams(shotIdx: Int): Triple<Double, Double, Double> {
 		val tier = shotIdx / TIER_SIZE
-		val baseAngle = (shotIdx % TIER_SIZE).toDouble() / TIER_SIZE * 2 * PI
-		val angle = baseAngle + Random.nextDouble(-PI / TIER_SIZE, PI / TIER_SIZE)
+		// Each group of RELOCATE_EVERY shots covers a full 360° orbit
+		val baseAngle = (shotIdx % RELOCATE_EVERY).toDouble() / RELOCATE_EVERY * 2 * PI
+		val angle = baseAngle + Random.nextDouble(-PI / RELOCATE_EVERY, PI / RELOCATE_EVERY)
 		return when (tier) {
-			0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))   // close, almost horizontal
-			1 -> Triple(angle, Random.nextDouble(5.0, 9.0), Random.nextDouble(1.0, 3.0))   // medium, slight angle
-			2 -> Triple(angle, Random.nextDouble(9.0, 15.0), Random.nextDouble(1.5, 4.0))  // far, moderate angle
-			3 -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(0.3, 2.0))   // close, side repeat
-			4 -> Triple(angle, Random.nextDouble(6.0, 11.0), Random.nextDouble(2.5, 6.0))  // medium, mid-height
-			5 -> Triple(angle, Random.nextDouble(10.0, 17.0), Random.nextDouble(0.5, 3.0)) // far, eye-level
-			else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0)) // top-down
+			0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))
+			1 -> Triple(angle, Random.nextDouble(5.0, 9.0), Random.nextDouble(1.0, 3.0))
+			2 -> Triple(angle, Random.nextDouble(9.0, 15.0), Random.nextDouble(1.5, 4.0))
+			3 -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(0.3, 2.0))
+			4 -> Triple(angle, Random.nextDouble(6.0, 11.0), Random.nextDouble(2.5, 6.0))
+			5 -> Triple(angle, Random.nextDouble(10.0, 17.0), Random.nextDouble(0.5, 3.0))
+			else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0))
 		}
 	}
 
@@ -456,9 +530,9 @@ data object AutoCapture {
 		safeY = surfY
 		teleportPlayer(mc, baseX.toDouble(), surfY, baseZ.toDouble())
 
-		val mobType = MOB_TYPES[mobIndex]
-		currentMobEntityType = mobType
-		currentMobRegName = BuiltInRegistries.ENTITY_TYPE.getKey(mobType).toString()
+		val entry = MOB_ENTRIES[mobIndex]
+		currentMobEntityType = entry.entityType
+		currentMobRegName = BuiltInRegistries.ENTITY_TYPE.getKey(entry.entityType).toString()
 		currentMobName = currentMobRegName.substringAfter(':')
 		val (clearMobX, clearMobZ) = findClearPos(mc, baseX.toDouble(), baseZ.toDouble())
 		mobX = clearMobX
@@ -474,7 +548,7 @@ data object AutoCapture {
 		}
 		pendingMobSurfaceSnap = mobX to mobZ
 		mobSpawned = true
-		shotCount = 0; subTick = 0
+		subTick = 0
 		return true
 	}
 
@@ -486,6 +560,7 @@ data object AutoCapture {
 		}
 	}
 
+	// Full reset for a new mob - also resets shotCount and dimension phase.
 	private fun resetShotState() {
 		shotCount = 0
 		subTick = 0
@@ -497,6 +572,7 @@ data object AutoCapture {
 		relocationCursor = 0
 		targetBucket = 0
 		currentMobEntityType = null
+		dimensionPhaseIndex = 0
 	}
 
 	private fun resetMobState() {
@@ -509,11 +585,32 @@ data object AutoCapture {
 		poolPreloadIdx = 0
 	}
 
+	// Resets spatial state for a new dimension phase while preserving shotCount and mob identity.
+	private fun resetDimPhaseState() {
+		subTick = 0
+		terrainWaitTick = 0
+		lastRelocatedAtShot = -1
+		mobSpawned = false
+		nextRelocation = null
+		pendingMobSurfaceSnap = null
+		relocationCursor = 0
+		targetBucket = 0
+		relocationPool = emptyList()
+		poolBuildQueue = emptyList()
+		poolBuildIndex = 0
+		poolBiomeMap.clear()
+		poolBuildDone = false
+		poolPreloadIdx = 0
+	}
+
+	// Base position range: End main island is limited; Nether and OW can roam wider.
+	private val basePosRange: IntRange get() = if (currentDimension == MobDimension.END) -150..150 else -500..500
+
 	internal fun start(mc: Minecraft) {
 		completedMobs = ProgressStore.load(mc)
 		val nextIdx = findNextMob(completedMobs)
 		if (nextIdx == -1) {
-			mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAll ${MOB_TYPES.size} mobs already captured. Use §7/yoloclear §fto reset."))
+			mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAll ${MOB_ENTRIES.size} mobs already captured. Use §7/yoloclear §fto reset."))
 			return
 		}
 		mobIndex = nextIdx
@@ -528,17 +625,27 @@ data object AutoCapture {
 		mc.options.fov().set(70)
 
 		val wDesc = WeatherPhase.entries.joinToString(" ") { "${it.pct}%${it.label.first()}" }
-		val resumeMsg = if (completedMobs.isNotEmpty()) " §8(resuming from §f${mobRegName(nextIdx).substringAfter(':')}§8, ${completedMobs.size}/${MOB_TYPES.size} done)" else ""
+		val resumeMsg =
+			if (completedMobs.isNotEmpty()) " §8(resuming from §f${mobRegName(nextIdx).substringAfter(':')}§8, ${completedMobs.size}/${MOB_ENTRIES.size} done)" else ""
 		mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAuto-capture started$resumeMsg §8- §7/yolostop  /yoloclear"))
 		mc.player?.sendSystemMessage(Component.literal("§8  shots/mob: §f$SHOTS_PER_MOB §8| weather: §f$wDesc §8| time: §f+${TIME_PER_SHOT / 20}s/shot"))
-		mc.player?.sendSystemMessage(Component.literal("§8  relocate every §f$RELOCATE_EVERY §8shots | biome pre-map §f±${BIOME_SCAN_RADIUS}blk §8step §f$BIOME_PREMAP_STEP §8| §f${MOB_TYPES.size} §8mob types"))
+		mc.player?.sendSystemMessage(Component.literal("§8  relocate every §f$RELOCATE_EVERY §8shots | biome pre-map §f±${BIOME_SCAN_RADIUS}blk §8step §f$BIOME_PREMAP_STEP §8| §f${MOB_ENTRIES.size} §8mob types"))
 
 		val server = mc.singleplayerServer
 		if (server != null) {
 			server.execute {
-				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doMobSpawning false")
-				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doDaylightCycle false")
-				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doWeatherCycle false")
+				server.commands.performPrefixedCommand(
+					server.createCommandSourceStack(),
+					"gamerule doMobSpawning false"
+				)
+				server.commands.performPrefixedCommand(
+					server.createCommandSourceStack(),
+					"gamerule doDaylightCycle false"
+				)
+				server.commands.performPrefixedCommand(
+					server.createCommandSourceStack(),
+					"gamerule doWeatherCycle false"
+				)
 			}
 		} else {
 			mc.player?.connection?.sendCommand("gamerule doMobSpawning false")
@@ -564,8 +671,14 @@ data object AutoCapture {
 		if (server != null) {
 			server.execute {
 				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doMobSpawning true")
-				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doDaylightCycle true")
-				server.commands.performPrefixedCommand(server.createCommandSourceStack(), "gamerule doWeatherCycle true")
+				server.commands.performPrefixedCommand(
+					server.createCommandSourceStack(),
+					"gamerule doDaylightCycle true"
+				)
+				server.commands.performPrefixedCommand(
+					server.createCommandSourceStack(),
+					"gamerule doWeatherCycle true"
+				)
 			}
 		} else {
 			mc.player?.connection?.sendCommand("gamerule doMobSpawning true")
@@ -581,13 +694,14 @@ data object AutoCapture {
 		val conn = player.connection
 
 		if (phase == Phase.CAPTURING) {
+			val dimLabel = if (currentDimension != MobDimension.OVERWORLD) " §8[§7${currentDimension.label}§8]" else ""
 			val icon = when (currentWeather) {
 				"rain" -> "§9☂"; "thunder" -> "§5⚡"; else -> "§a☀"
 			}
 			val hour = (currentTime / 1000L + 6L) % 24L
 			mc.gui.setOverlayMessage(
 				Component.literal(
-					"$icon §f$currentMobName §8| §7shot ${shotCount + 1}/$SHOTS_PER_MOB §8| §7mob ${completedCount + 1}/${MOB_TYPES.size} §8| §7%02d:00".format(
+					"$icon §f$currentMobName$dimLabel §8| §7shot ${shotCount + 1}/$SHOTS_PER_MOB §8| §7mob ${completedCount + 1}/${MOB_ENTRIES.size} §8| §7%02d:00".format(
 						hour
 					)
 				),
@@ -600,31 +714,52 @@ data object AutoCapture {
 
 			Phase.SETUP -> {
 				if (setupTick == 0) {
+					// Set dimension for this phase
+					val entry = MOB_ENTRIES[mobIndex]
+					currentDimension = entry.dimensions[dimensionPhaseIndex]
+					currentDimensionKey = currentDimension.levelKey
+
 					val server = mc.singleplayerServer
 					if (server != null) {
-						val dimension = mc.level?.dimension() ?: Level.OVERWORLD
+						val dimKey = currentDimensionKey
 						server.execute {
-							val sLevel = server.getLevel(dimension) ?: return@execute
+							val sLevel = server.getLevel(dimKey) ?: return@execute
 							sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
-							sLevel.allEntities.filter { it !is ServerPlayer }.forEach { it.discard() }
+							// Also kill OW entities when switching dimensions
+							server.getLevel(Level.OVERWORLD)?.allEntities
+								?.filter { it.entityTags().contains(MOB_TAG) }
+								?.forEach { it.discard() }
 							serverPlayer(mc)?.gameMode?.changeGameModeForPlayer(GameType.SPECTATOR)
 						}
 					} else {
 						conn.sendCommand("kill @e[type=!player]")
 						conn.sendCommand("gamemode spectator")
 					}
+
 					baseTime = Random.nextLong(0, 24000)
-					baseX = Random.nextInt(-500, 500)
-					baseZ = Random.nextInt(-500, 500)
-					resetMobState()
+					val range = basePosRange
+					baseX = Random.nextInt(range.first, range.last + 1)
+					baseZ = Random.nextInt(range.first, range.last + 1)
+
+					if (dimensionPhaseIndex == 0) resetMobState() else resetDimPhaseState()
+
 					startPoolBuild()
 					preloadPosition(mc, baseX.toDouble(), baseZ.toDouble())
+
+					if (dimensionPhaseIndex > 0) {
+						mc.player?.sendSystemMessage(
+							Component.literal("§e[YoloGen] §f$currentMobName §8→ §7${currentDimension.label} §8(phase ${dimensionPhaseIndex + 1}/${entry.dimensions.size})")
+						)
+					}
 				}
 
 				advancePoolBuild(mc)
 
+				// Wait for the client level to switch to the target dimension before spawning
 				if (setupTick >= MOB_SPAWN_TICK && !mobSpawned) {
-					spawnMobOnLoadedSurface(mc)
+					if (mc.level?.dimension() == currentDimensionKey) {
+						spawnMobOnLoadedSurface(mc)
+					}
 				}
 
 				pendingMobSurfaceSnap?.let { (x, z) ->
@@ -637,19 +772,19 @@ data object AutoCapture {
 			}
 
 			Phase.CAPTURING -> {
+				clearMobFire(mc)
+
 				pendingMobSurfaceSnap?.let { (x, z) ->
 					if (!snapMobToLoadedSurface(mc, x, z)) return
 					terrainWaitTick = TERRAIN_POST_SNAP_TICKS
 					return
 				}
 
-				// Wait after mob snap so chunk meshes finish building before orbit shots.
 				if (terrainWaitTick > 0) {
 					terrainWaitTick--
 					if (terrainWaitTick > 0) return
 				}
 
-				// Re-lock rotation every tick - guards against server packet resets.
 				if (subTick > 0) applyRotation(mc)
 
 				when (subTick) {
@@ -707,17 +842,30 @@ data object AutoCapture {
 							DatasetCapture.pendingCapture = true
 							totalShots++
 						}
-						if (++shotCount >= SHOTS_PER_MOB) {
-							ProgressStore.markCompleted(mc, currentMobName)
-							completedMobs = completedMobs + currentMobName
-							completedCount = completedMobs.size
-							val nextIdx = findNextMob(completedMobs)
-							if (nextIdx == -1) {
-								mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAll ${MOB_TYPES.size} mobs completed! $totalShots total shots."))
-								stop(mc)
-							} else {
-								mobIndex = nextIdx
+
+						val newCount = ++shotCount
+						val entry = MOB_ENTRIES[mobIndex]
+						val phaseLimit = shotLimitForPhase(dimensionPhaseIndex, entry.dimensions.size)
+
+						if (newCount >= phaseLimit) {
+							if (dimensionPhaseIndex < entry.dimensions.size - 1) {
+								// Advance to next dimension phase for this mob
+								dimensionPhaseIndex++
 								phase = Phase.SETUP; setupTick = 0
+							} else {
+								// All dimension phases done - mob complete
+								ProgressStore.markCompleted(mc, currentMobName)
+								completedMobs = completedMobs + currentMobName
+								completedCount = completedMobs.size
+								val nextIdx = findNextMob(completedMobs)
+								if (nextIdx == -1) {
+									mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAll ${MOB_ENTRIES.size} mobs completed! $totalShots total shots."))
+									stop(mc)
+								} else {
+									mobIndex = nextIdx
+									resetShotState()
+									phase = Phase.SETUP; setupTick = 0
+								}
 							}
 						}
 						subTick = 0
