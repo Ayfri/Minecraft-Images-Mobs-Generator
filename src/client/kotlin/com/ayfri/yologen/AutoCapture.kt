@@ -127,7 +127,7 @@ data object AutoCapture {
 
 	internal val basePosRange: IntRange get() = if (currentDimension == MobDimension.END) -150..150 else -500..500
 
-	internal val SHOTS_PER_MOB get() = if (DatasetCapture.debugBBMode) 1 else ConfigHolder.config.shotsPerMob
+	internal val SHOTS_PER_MOB get() = ConfigHolder.config.shotsPerMob
 
 	internal fun mobRegName(idx: Int) =
 		BuiltInRegistries.ENTITY_TYPE.getKey(MOB_ENTRIES[idx].entityType).toString()
@@ -242,7 +242,6 @@ data object AutoCapture {
 	internal fun stop(mc: Minecraft) {
 		running = false; phase = Phase.IDLE
 		DatasetCapture.autoMode = true
-		DatasetCapture.debugBBMode = false
 
 		if (savedFov != -1) {
 			mc.options.fov().set(savedFov); savedFov = -1

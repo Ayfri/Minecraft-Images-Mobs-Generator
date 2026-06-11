@@ -23,12 +23,15 @@ fun registerCommands() {
 			}
 		)
 
-		// /yolostop - stop capture
+		// /yolostop - stop any running capture
 		dispatcher.register(
 			ClientCommands.literal("yolostop").executes { ctx ->
 				val mc = ctx.source.client
-				if (AutoCapture.running) AutoCapture.stop(mc)
-				else mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] Not running."))
+				when {
+					AutoCapture.running -> AutoCapture.stop(mc)
+					DebugBBCapture.running -> DebugBBCapture.stop(mc)
+					else -> mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] Not running."))
+				}
 				1
 			}
 		)
@@ -41,16 +44,14 @@ fun registerCommands() {
 			}
 		)
 
-		// /yolodebugbb - capture 1 shot/mob with bounding box drawn on image → dataset/debug/
+		// /yolodebugbb - standalone debug: 1 frontal shot per mob in the air → dataset/debug/
 		dispatcher.register(
 			ClientCommands.literal("yolodebugbb").executes { ctx ->
 				val mc = ctx.source.client
-				if (AutoCapture.running) {
+				if (AutoCapture.running || DebugBBCapture.running) {
 					mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] Already running - /yolostop first."))
 				} else {
-					DatasetCapture.debugBBMode = true
-					AutoCapture.start(mc)
-					mc.player?.sendSystemMessage(Component.literal("§e[YoloGen] §fDebug BB mode: 1 shot/mob → §7dataset/debug/"))
+					DebugBBCapture.start(mc)
 				}
 				1
 			}

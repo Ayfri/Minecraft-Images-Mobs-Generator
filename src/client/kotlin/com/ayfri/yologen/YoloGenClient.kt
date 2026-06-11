@@ -8,6 +8,7 @@ object YoloGenClient : ClientModInitializer {
 		ConfigHolder.load(net.minecraft.client.Minecraft.getInstance())
 		DatasetCapture.register()
 		AutoCapture.register()
+		DebugBBCapture.register()
 		registerHud()
 		registerCommands()
 	}
