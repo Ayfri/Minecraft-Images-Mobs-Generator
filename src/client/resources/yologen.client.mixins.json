@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.ayfri.yologen.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "LevelRendererAccessor",
+    "LevelRendererOutlineMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
