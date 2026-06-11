@@ -1,0 +1,86 @@
+package com.ayfri.yologen.config
+
+import com.google.gson.GsonBuilder
+import net.minecraft.client.Minecraft
+import java.io.File
+
+data class YoloConfig(
+    // ── Capture timing ────────────────────────────────────────────────────────
+    /** Screenshots taken per mob (split evenly across its dimensions). */
+    val shotsPerMob: Int = 200,
+    /** Render distance (chunks) set while capturing; restored on stop. */
+    val captureRenderDistance: Int = 8,
+    /** Move mob+camera to a new biome location every N shots. */
+    val relocateEvery: Int = 10,
+    /** In-game time ticks advanced per shot (for day/night progression). */
+    val timePerShot: Long = 400L,
+    /** Radius (blocks) searched when building the biome relocation pool. */
+    val biomeSearchRadius: Int = 2000,
+
+    // ── Weather fractions (must sum to ≤ 1.0; remainder is clear) ────────────
+    val weatherClearFraction: Float = 0.60f,
+    val weatherRainFraction: Float = 0.20f,
+    // weatherThunderFraction is implied: 1 - clear - rain
+
+    // ── Output image ──────────────────────────────────────────────────────────
+    val targetWidth: Int = 1280,
+    val targetHeight: Int = 720,
+    /** Pixels cropped from the left/right before saving (applied after scale). */
+    val cropX: Int = 384,
+    /** Pixels cropped from the top/bottom before saving (applied after scale). */
+    val cropY: Int = 216,
+    /** Final image width after crop. */
+    val cropWidth: Int = 512,
+    /** Final image height after crop. */
+    val cropHeight: Int = 288,
+
+    // ── Diversity axes (all disabled by default) ──────────────────────────────
+    /** Capture baby variants and mob color/type variants where available. */
+    val babyAndVariants: Boolean = false,
+    /** Equip random armor / held items on mobs. */
+    val equipmentAndPoses: Boolean = false,
+    /** Spawn multiple mobs simultaneously per frame (uses AABB boxes). */
+    val multipleMobsPerFrame: Boolean = false,
+    /** How many extra mobs to spawn when multipleMobsPerFrame is on (1 = pairs). */
+    val extraMobsCount: Int = 2,
+    /** Add small per-shot camera jitter and wider time-of-day spread. */
+    val cameraJitterAndLighting: Boolean = false,
+    /** Max yaw/pitch jitter in degrees when cameraJitterAndLighting is on. */
+    val cameraJitterDegrees: Float = 4f,
+)
+
+object ConfigHolder {
+    private val gson = GsonBuilder().setPrettyPrinting().create()
+
+    @Volatile
+    var config: YoloConfig = YoloConfig()
+        private set
+
+    private fun file(mc: Minecraft) = File(mc.gameDirectory, "config/yologen.json")
+
+    fun load(mc: Minecraft) {
+        val f = file(mc)
+        if (!f.exists()) {
+            save(mc)
+            return
+        }
+        try {
+            config = gson.fromJson(f.readText(), YoloConfig::class.java) ?: YoloConfig()
+        } catch (_: Exception) {
+            config = YoloConfig()
+            save(mc) // overwrite corrupt file with defaults
+        }
+    }
+
+    /** Reloads config from disk and returns the new instance. */
+    fun reload(mc: Minecraft): YoloConfig {
+        load(mc)
+        return config
+    }
+
+    private fun save(mc: Minecraft) {
+        val f = file(mc)
+        f.parentFile?.mkdirs()
+        f.writeText(gson.toJson(config))
+    }
+}
