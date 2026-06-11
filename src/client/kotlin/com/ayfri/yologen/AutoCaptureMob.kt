@@ -232,11 +232,13 @@ internal fun AutoCapture.spawnMobEntity(mc: Minecraft, x: Double, y: Double, z: 
 
 		spawnSingleMob(sLevel, mc, x, y, z, currentMobEntityType ?: return@execute, cfg)
 
-		if (cfg.multipleMobsPerFrame) {
-			repeat(cfg.extraMobsCount - 1) { i ->
-				val angle = (i + 1) * (2.0 * PI / cfg.extraMobsCount)
-				val ex = x + cos(angle) * 3.0
-				val ez = z + sin(angle) * 3.0
+		if (cfg.multipleMobsPerFrame && cfg.extraMobsCount > 1) {
+			val extra = Random.nextInt(0, cfg.extraMobsCount)
+			repeat(extra) {
+				val angle = Random.nextDouble(0.0, 2.0 * PI)
+				val dist = Random.nextDouble(2.0, 6.0)
+				val ex = x + cos(angle) * dist
+				val ez = z + sin(angle) * dist
 				val ey = loadedSurfaceYServer(sLevel, ex.toInt(), ez.toInt()) ?: y
 				spawnSingleMob(sLevel, mc, ex, ey, ez, currentMobEntityType ?: return@execute, cfg)
 			}
