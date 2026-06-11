@@ -1,5 +1,6 @@
 package com.ayfri.yologen
 
+import com.ayfri.yologen.config.ConfigHolder
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElement
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry
 import net.minecraft.client.Minecraft
@@ -61,6 +62,7 @@ fun registerHud() {
 
 		val mc = Minecraft.getInstance()
 		val font = mc.font
+		val cfg = ConfigHolder.config
 		val panelW = 430
 		val x = g.guiWidth() / 2 - panelW / 2
 		val y0 = 5
@@ -71,15 +73,16 @@ fun registerHud() {
 		val isCapturing = AutoCapture.phase == AutoCapture.Phase.CAPTURING
 		val panelH = if (AutoCapture.terrainWaitTick > 0) 152 else 138
 
-		// ETA estimate: ticks per mob × remaining mobs + remaining shots in current mob
-		val ticksPerMob = AutoCapture.SETUP_WAIT_TICKS +
-			AutoCapture.SHOTS_PER_MOB * 3 +
-			(AutoCapture.SHOTS_PER_MOB / AutoCapture.RELOCATE_EVERY) * AutoCapture.TERRAIN_WAIT_TICKS
-		val mobsLeft = MOB_TYPES.size - AutoCapture.completedCount - 1
-		val shotsLeft = AutoCapture.SHOTS_PER_MOB - AutoCapture.shotCount
-		val ticksLeft = mobsLeft * ticksPerMob + shotsLeft * 3
-		val secsLeft = ticksLeft / 20
-		val etaText = "%d:%02d".format(secsLeft / 60, secsLeft % 60)
+		// ETA: real wall-clock elapsed / fraction done → remaining real time
+		val shotsPerMob = AutoCapture.SHOTS_PER_MOB
+		val totalShots = MOB_TYPES.size * shotsPerMob
+		val doneShots = AutoCapture.completedCount * shotsPerMob + AutoCapture.shotCount
+		val elapsedMs = System.currentTimeMillis() - AutoCapture.startTimeMs
+		val etaText = if (doneShots > 0 && elapsedMs > 0) {
+			val msLeft = elapsedMs * (totalShots - doneShots) / doneShots
+			val secsLeft = (msLeft / 1000).toInt()
+			"%d:%02d".format(secsLeft / 60, secsLeft % 60)
+		} else "…"
 
 		g.fill(x, y0, x + panelW, y0 + panelH, PANEL_BG)
 		g.fill(x, y0, x + panelW, y0 + 1, PANEL_BORDER)
@@ -110,7 +113,7 @@ fun registerHud() {
 		// Per-mob weather bar (background segments)
 		var segX = barX
 		for (phase in WeatherPhase.entries) {
-			val segW = (barW * phase.fraction).toInt().let {
+			val segW = (barW * phase.fraction(cfg)).toInt().let {
 				if (phase == WeatherPhase.entries.last()) barX + barW - segX else it
 			}
 			g.fill(segX, y, segX + segW, y + barH, weatherPhaseBg(phase))
@@ -118,13 +121,13 @@ fun registerHud() {
 		}
 
 		// Per-mob weather bar (filled portion)
-		val shotFilled = if (isCapturing) barW * AutoCapture.shotCount / AutoCapture.SHOTS_PER_MOB else
-			barW * AutoCapture.setupTick / AutoCapture.SETUP_WAIT_TICKS
+		val shotFilled = if (isCapturing) barW * AutoCapture.shotCount / cfg.shotsPerMob else
+			(barW * AutoCapture.setupTick / AutoCapture.SETUP_WAIT_TICKS).coerceAtMost(barW)
 		if (isCapturing) {
 			var filledLeft = shotFilled
 			var drawX = barX
 			for (phase in WeatherPhase.entries) {
-				val segW = (barW * phase.fraction).toInt().let {
+				val segW = (barW * phase.fraction(cfg)).toInt().let {
 					if (phase == WeatherPhase.entries.last()) barX + barW - drawX else it
 				}
 				val fill = filledLeft.coerceIn(0, segW)
@@ -140,7 +143,7 @@ fun registerHud() {
 		// Weather transition markers + cursor
 		var markerX = barX
 		for (phase in WeatherPhase.entries.dropLast(1)) {
-			markerX += (barW * phase.fraction).toInt()
+			markerX += (barW * phase.fraction(cfg)).toInt()
 			g.fill(markerX, y - 1, markerX + 1, y + barH + 1, 0xDDFFFFFF.toInt())
 		}
 		val cursorX = barX + shotFilled.coerceIn(0, barW)
@@ -150,12 +153,21 @@ fun registerHud() {
 		// Weather phase labels with percentage
 		val entryW = barW / WeatherPhase.entries.size
 		WeatherPhase.entries.forEachIndexed { i, phase ->
-			g.label(font, "${phase.label} ${phase.pct}%", barX + i * entryW, y, weatherPhaseColor(phase))
+			g.label(font, "${phase.label} ${phase.pct(cfg)}%", barX + i * entryW, y, weatherPhaseColor(phase))
 		}
 		y += lh + 6
 
-		val shotLabel =
-			if (isCapturing) "${AutoCapture.shotCount}/${AutoCapture.SHOTS_PER_MOB}" else "${AutoCapture.setupTick}/${AutoCapture.SETUP_WAIT_TICKS}"
+		val setupStuck = !isCapturing && AutoCapture.setupTick > AutoCapture.SETUP_WAIT_TICKS
+		val setupBlockReason = when {
+			setupStuck && !AutoCapture.mobSpawned -> "waiting spawn"
+			setupStuck && !AutoCapture.poolBuildDone -> "building pool"
+			else -> null
+		}
+		val shotLabel = when {
+			isCapturing -> "${AutoCapture.shotCount}/${cfg.shotsPerMob}"
+			setupBlockReason != null -> setupBlockReason
+			else -> "${AutoCapture.setupTick}/${AutoCapture.SETUP_WAIT_TICKS}"
+		}
 		val weatherLabel = if (isCapturing) AutoCapture.currentWeather else "setup"
 		val preloadLabel = when {
 			AutoCapture.terrainWaitTick > 0 -> "terrain ${AutoCapture.terrainWaitTick}t"
@@ -169,8 +181,8 @@ fun registerHud() {
 		y += 21
 
 		// Global progress bar
-		val totalShotsAll = MOB_TYPES.size * AutoCapture.SHOTS_PER_MOB
-		val shotsDoneGlobal = (AutoCapture.completedCount * AutoCapture.SHOTS_PER_MOB + AutoCapture.shotCount)
+		val totalShotsAll = MOB_TYPES.size * cfg.shotsPerMob
+		val shotsDoneGlobal = (AutoCapture.completedCount * cfg.shotsPerMob + AutoCapture.shotCount)
 			.coerceAtMost(totalShotsAll)
 		val globalFilled = barW * shotsDoneGlobal / totalShotsAll
 		g.fill(barX, y, barX + barW, y + barH, GLOBAL_BAR_BG)
@@ -191,7 +203,7 @@ fun registerHud() {
 
 		g.text(
 			font,
-			"relocation: $preloadLabel  | every ${AutoCapture.RELOCATE_EVERY} shots | radius ±${AutoCapture.BIOME_SCAN_RADIUS}",
+			"relocation: $preloadLabel  | every ${cfg.relocateEvery} shots | radius ±${cfg.biomeSearchRadius}",
 			x + 10,
 			y,
 			TEXT_DIM

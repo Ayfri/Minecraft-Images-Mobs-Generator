@@ -1,6 +1,8 @@
 package com.ayfri.yologen
 
+import com.ayfri.yologen.config.ConfigHolder
 import com.mojang.blaze3d.platform.NativeImage
+import kotlin.math.sqrt
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
 import net.minecraft.client.Minecraft
 import net.minecraft.client.Screenshot
@@ -8,15 +10,6 @@ import java.io.File
 import java.io.FileWriter
 import java.util.*
 import java.util.concurrent.Executors
-
-private const val TARGET_W = 1280
-private const val TARGET_H = 720
-
-// 30% crop from each edge after scaling (1280×0.3=384, 720×0.3=216) → 512×288 final images
-private const val CROP_X = 384
-private const val CROP_Y = 216
-private const val CROP_W = 512
-private const val CROP_H = 288
 
 private const val FRAMES_CSV_HEADER = "frame,mob,weather,time_ticks,shot,mob_idx,mob_x,mob_y,mob_z"
 private const val BOXES_CSV_HEADER = "frame,class_id,cx,cy,w,h,dist_blocks"
@@ -41,6 +34,7 @@ data object DatasetCapture {
 	private const val CAPTURE_EVERY_N_FRAMES = 20
 
 	var autoMode = true
+	var debugBBMode = false
 
 	@Volatile
 	var pendingCapture = false
@@ -68,23 +62,65 @@ data object DatasetCapture {
 			pendingCapture = false
 
 			val mc = Minecraft.getInstance()
-			val levelState = context.levelState()
-			val camera = levelState.cameraRenderState
+			val cfg = ConfigHolder.config
+
 			val screenW = mc.window.width
 			val screenH = mc.window.height
 
-			val boxes = levelState.entityRenderStates.mapNotNull {
-				it.toYoloBox(camera, screenW, screenH)
+			// Primary path (!autoMode = auto-capture running):
+			//   - Known class ID → pixel-perfect silhouette from entity-outline buffer.
+			//     The mob is tagged glowing by AutoCapture.spawnMobEntity; the glow ring
+			//     is suppressed by LevelRendererOutlineMixin so it never reaches the screenshot.
+			//   - No class ID (multi-mob diversity) → AABB projector per entity.
+			//
+			// Fallback path (autoMode = manual/explore mode): AABB projector.
+			val boxes: List<YoloBox>
+			if (!autoMode && AutoCapture.running) {
+				val classId = YOLO_CLASS_MAP[AutoCapture.currentMobEntityType]
+				if (classId != null) {
+					val player = mc.player ?: return@register
+					val dx = AutoCapture.mobX - player.x
+					val dy = (AutoCapture.mobY + 1.0) - player.eyeY
+					val dz = AutoCapture.mobZ - player.z
+					val dist = sqrt(dx * dx + dy * dy + dz * dz).toFloat()
+					val sBox = readSilhouetteBox(mc, classId, dist)
+					if (sBox != null) {
+						boxes = listOf(sBox)
+					} else {
+						// Silhouette buffer unavailable - fall back to AABB projection
+						val levelState = context.levelState()
+						val camera = levelState.cameraRenderState
+						boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
+						if (boxes.isEmpty()) return@register
+					}
+				} else {
+					// Multi-mob diversity: AABB per entity
+					val levelState = context.levelState()
+					val camera = levelState.cameraRenderState
+					boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
+					if (boxes.isEmpty()) return@register
+				}
+			} else {
+				// Auto-mode or manual capture: AABB for all visible entities
+				val levelState = context.levelState()
+				val camera = levelState.cameraRenderState
+				boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
+				if (boxes.isEmpty()) return@register
 			}
-			if (boxes.isEmpty()) return@register
 
 			val idx = captureIndex++
 			val name = "frame_%06d".format(idx)
 			val gameDir = mc.gameDirectory
 
-			// In Fabulous graphics mode, translucent terrain (water) is rendered to a separate
-			// framebuffer that hasn't been composited onto mainRenderTarget at END_MAIN yet.
-			// We read both targets here on the render thread, then composite on the IO thread.
+			val targetW = cfg.targetWidth
+			val targetH = cfg.targetHeight
+			val cropX = cfg.cropX
+			val cropY = cfg.cropY
+			val cropW = cfg.cropWidth
+			val cropH = cfg.cropHeight
+
+			// In Fabulous graphics mode, translucent terrain is rendered to a separate
+			// framebuffer that hasn't been composited yet. Composite on the IO thread.
 			val translucentTarget = mc.levelRenderer.translucentTarget
 
 			Screenshot.takeScreenshot(mc.mainRenderTarget) { mainImg ->
@@ -97,14 +133,16 @@ data object DatasetCapture {
 										compositeOver(main, trans)
 									}
 								}
-								writeCapture(main, boxes, metadata, name, gameDir)
+								writeCapture(main, boxes, metadata, name, gameDir,
+									targetW, targetH, cropX, cropY, cropW, cropH)
 							}
 						}
 					}
 				} else {
 					ioExecutor.submit {
 						mainImg.use { img ->
-							writeCapture(img, boxes, metadata, name, gameDir)
+							writeCapture(img, boxes, metadata, name, gameDir,
+								targetW, targetH, cropX, cropY, cropW, cropH)
 						}
 					}
 				}
@@ -118,13 +156,29 @@ data object DatasetCapture {
 		metadata: CaptureMetadata?,
 		name: String,
 		gameDir: File,
+		targetW: Int,
+		targetH: Int,
+		cropX: Int,
+		cropY: Int,
+		cropW: Int,
+		cropH: Int,
 	) {
-		val scaledImage = if (img.width > TARGET_W || img.height > TARGET_H) img.scaleDown() else img
-		val croppedImage = scaledImage.cropCenter()
+		val scaledImage = if (img.width > targetW || img.height > targetH)
+			img.scaleDown(targetW, targetH) else img
+		val croppedImage = scaledImage.cropCenter(cropX, cropY, cropW, cropH)
 		var croppedBoxes: List<YoloBox> = emptyList()
 		try {
-			croppedBoxes = boxes.mapNotNull { it.applyCrop() }
+			croppedBoxes = boxes.mapNotNull { it.applyCrop(targetW, targetH, cropX, cropY, cropW, cropH) }
 			if (croppedBoxes.isEmpty()) return
+
+			if (debugBBMode) {
+				croppedImage.drawBoundingBoxes(croppedBoxes)
+				val debugDir = File(gameDir, "dataset/debug").also { it.mkdirs() }
+				val mobName = metadata?.mobName ?: name
+				croppedImage.writeToFile(File(debugDir, "$mobName.png"))
+				return
+			}
+
 			val imagesDir = File(gameDir, "dataset/images").also { it.mkdirs() }
 			croppedImage.writeToFile(File(imagesDir, "$name.png"))
 		} finally {
@@ -150,8 +204,7 @@ data object DatasetCapture {
 		}
 	}
 
-	// Porter-Duff "over": composites `trans` (the translucent layer) on top of `dst` in-place.
-	// Both images must have the same dimensions. Pixels in ABGR format (alpha in bits 24-31).
+	// Porter-Duff "over": composites `trans` on top of `dst` in-place.
 	private fun compositeOver(dst: NativeImage, trans: NativeImage) {
 		val w = dst.width
 		val h = dst.height
@@ -174,59 +227,96 @@ data object DatasetCapture {
 		}
 	}
 
-	// Nearest-neighbor downscale using the bulk pixel getter.
-	private fun NativeImage.scaleDown(): NativeImage {
-		val dst = NativeImage(NativeImage.Format.RGBA, TARGET_W, TARGET_H, false)
+	// Nearest-neighbor downscale.
+	private fun NativeImage.scaleDown(targetW: Int, targetH: Int): NativeImage {
+		val dst = NativeImage(NativeImage.Format.RGBA, targetW, targetH, false)
 		val src = pixelsABGR
-		val scaleX = width.toFloat() / TARGET_W
-		val scaleY = height.toFloat() / TARGET_H
-		for (y in 0 until TARGET_H) {
+		val scaleX = width.toFloat() / targetW
+		val scaleY = height.toFloat() / targetH
+		for (y in 0 until targetH) {
 			val srcRow = (y * scaleY).toInt() * width
-			for (x in 0 until TARGET_W) {
+			for (x in 0 until targetW) {
 				dst.setPixelABGR(x, y, src[srcRow + (x * scaleX).toInt()])
 			}
 		}
 		return dst
 	}
 
-	// Crops 30% from each edge (CROP_X/Y offset, CROP_W×CROP_H result).
-	private fun NativeImage.cropCenter(): NativeImage {
-		val dst = NativeImage(NativeImage.Format.RGBA, CROP_W, CROP_H, false)
+	// Crops from (cropX, cropY) for cropW×cropH pixels.
+	private fun NativeImage.cropCenter(cropX: Int, cropY: Int, cropW: Int, cropH: Int): NativeImage {
+		val dst = NativeImage(NativeImage.Format.RGBA, cropW, cropH, false)
 		val src = pixelsABGR
-		for (y in 0 until CROP_H) {
-			val srcRow = (y + CROP_Y) * width + CROP_X
-			for (x in 0 until CROP_W) {
+		for (y in 0 until cropH) {
+			val srcRow = (y + cropY) * width + cropX
+			for (x in 0 until cropW) {
 				dst.setPixelABGR(x, y, src[srcRow + x])
 			}
 		}
 		return dst
 	}
 
-	// Re-normalizes a YoloBox from TARGET space to the cropped image space. Returns null if the box
-	// is entirely outside the crop region or too small after clipping.
-	private fun YoloBox.applyCrop(): YoloBox? {
-		val left = (x - w / 2f) * TARGET_W
-		val right = (x + w / 2f) * TARGET_W
-		val top = (y - h / 2f) * TARGET_H
-		val bot = (y + h / 2f) * TARGET_H
+	// Re-normalises a YoloBox from TARGET space to the cropped-image space.
+	private fun YoloBox.applyCrop(
+		targetW: Int, targetH: Int,
+		cropX: Int, cropY: Int, cropW: Int, cropH: Int,
+	): YoloBox? {
+		val left = (x - w / 2f) * targetW
+		val right = (x + w / 2f) * targetW
+		val top = (y - h / 2f) * targetH
+		val bot = (y + h / 2f) * targetH
 
-		val cl = left.coerceAtLeast(CROP_X.toFloat())
-		val cr = right.coerceAtMost((CROP_X + CROP_W).toFloat())
-		val ct = top.coerceAtLeast(CROP_Y.toFloat())
-		val cb = bot.coerceAtMost((CROP_Y + CROP_H).toFloat())
+		val cl = left.coerceAtLeast(cropX.toFloat())
+		val cr = right.coerceAtMost((cropX + cropW).toFloat())
+		val ct = top.coerceAtLeast(cropY.toFloat())
+		val cb = bot.coerceAtMost((cropY + cropH).toFloat())
 
 		val cw = cr - cl
 		val ch = cb - ct
 		if (cw < 5f || ch < 5f) return null
 
 		return copy(
-			x = (cl + cw / 2f - CROP_X) / CROP_W,
-			y = (ct + ch / 2f - CROP_Y) / CROP_H,
-			w = cw / CROP_W,
-			h = ch / CROP_H,
+			x = (cl + cw / 2f - cropX) / cropW,
+			y = (ct + ch / 2f - cropY) / cropH,
+			w = cw / cropW,
+			h = ch / cropH,
 		)
 	}
 
 	private fun YoloBox.toCsvRow(frameName: String) =
 		"$frameName,$classId,$x,$y,$w,$h,$dist"
+
+	// ABGR colors cycling per class ID - same palette as Python cv2 debug visualisations
+	private val BB_COLORS = intArrayOf(
+		0xFF00FF00.toInt(), // green
+		0xFF0000FF.toInt(), // red
+		0xFFFF0000.toInt(), // blue
+		0xFF00FFFF.toInt(), // yellow
+		0xFFFF00FF.toInt(), // magenta
+		0xFFFFFF00.toInt(), // cyan
+		0xFF0080FF.toInt(), // orange
+		0xFF80FF00.toInt(), // lime
+	)
+
+	private fun NativeImage.drawBoundingBoxes(boxes: List<YoloBox>) {
+		val w = width
+		val h = height
+		for (box in boxes) {
+			val color = BB_COLORS[box.classId % BB_COLORS.size]
+			val x1 = ((box.x - box.w / 2f) * w).toInt().coerceIn(0, w - 1)
+			val y1 = ((box.y - box.h / 2f) * h).toInt().coerceIn(0, h - 1)
+			val x2 = ((box.x + box.w / 2f) * w).toInt().coerceIn(0, w - 1)
+			val y2 = ((box.y + box.h / 2f) * h).toInt().coerceIn(0, h - 1)
+			// 2-pixel border thickness
+			for (t in 0..1) {
+				for (px in x1..x2) {
+					if (y1 + t < h) setPixelABGR(px, y1 + t, color)
+					if (y2 - t >= 0) setPixelABGR(px, y2 - t, color)
+				}
+				for (py in y1..y2) {
+					if (x1 + t < w) setPixelABGR(x1 + t, py, color)
+					if (x2 - t >= 0) setPixelABGR(x2 - t, py, color)
+				}
+			}
+		}
+	}
 }
