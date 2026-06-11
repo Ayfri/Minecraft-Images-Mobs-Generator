@@ -114,6 +114,10 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 				if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees * 2 - cfg.cameraJitterDegrees else 0f
 			val jitterPitch =
 				if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees - cfg.cameraJitterDegrees / 2 else 0f
+			val lookOffsetYaw = if (cfg.lookOffsetDegrees > 0f)
+				Random.nextFloat() * cfg.lookOffsetDegrees * 2 - cfg.lookOffsetDegrees else 0f
+			val lookOffsetPitch = if (cfg.lookOffsetDegrees > 0f)
+				Random.nextFloat() * cfg.lookOffsetDegrees - cfg.lookOffsetDegrees / 2 else 0f
 
 			val px = mobX + cos(angle) * dist
 			val pz = mobZ + sin(angle) * dist
@@ -128,8 +132,8 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 			val dy = (mobY + 1.0) - py
 			val dz = mobZ - pz
 			val h = sqrt(dx * dx + dz * dz)
-			targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat() + jitterYaw
-			targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat() + jitterPitch
+			targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat() + jitterYaw + lookOffsetYaw
+			targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat() + jitterPitch + lookOffsetPitch
 
 			player.snapTo(px, py, pz, targetYaw, targetPitch)
 			val server = mc.singleplayerServer

@@ -1,6 +1,8 @@
 package com.ayfri.yologen.config
 
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
 import net.minecraft.client.Minecraft
 import java.io.File
 
@@ -47,6 +49,9 @@ data class YoloConfig(
 	val cameraJitterAndLighting: Boolean = false,
 	/** Max yaw/pitch jitter in degrees when cameraJitterAndLighting is on. */
 	val cameraJitterDegrees: Float = 4f,
+	/** Max random look offset in degrees applied unconditionally before each shot
+	 *  so the mob is not always perfectly centred in the frame. */
+	val lookOffsetDegrees: Float = 10f,
 )
 
 object ConfigHolder {
@@ -78,9 +83,16 @@ object ConfigHolder {
 		return config
 	}
 
+	private fun sortedJsonObject(element: JsonElement): JsonElement {
+		if (element !is JsonObject) return element
+		val sorted = JsonObject()
+		element.entrySet().sortedBy { it.key }.forEach { (k, v) -> sorted.add(k, sortedJsonObject(v)) }
+		return sorted
+	}
+
 	private fun save(mc: Minecraft) {
 		val f = file(mc)
 		f.parentFile?.mkdirs()
-		f.writeText(gson.toJson(config))
+		f.writeText(gson.toJson(sortedJsonObject(gson.toJsonTree(config))))
 	}
 }
