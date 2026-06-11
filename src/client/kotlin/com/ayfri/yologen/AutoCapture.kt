@@ -104,9 +104,11 @@ data object AutoCapture {
 	internal var nextRelocation: Pair<Double, Double>? = null
 	internal var pendingMobSurfaceSnap: Pair<Double, Double>? = null
 	internal var relocationCursor = 0
-	@Volatile internal var relocationPool = emptyList<BiomeRelocation>()
+	@Volatile
+	internal var relocationPool = emptyList<BiomeRelocation>()
 	internal val cachedPools = mutableMapOf<MobDimension, List<BiomeRelocation>>()
-	@Volatile internal var poolBuildDone = false
+	@Volatile
+	internal var poolBuildDone = false
 	internal var targetPitch = 0f
 	internal var targetYaw = 0f
 
@@ -126,9 +128,6 @@ data object AutoCapture {
 	internal val basePosRange: IntRange get() = if (currentDimension == MobDimension.END) -150..150 else -500..500
 
 	internal val SHOTS_PER_MOB get() = if (DatasetCapture.debugBBMode) 1 else ConfigHolder.config.shotsPerMob
-	internal val RELOCATE_EVERY get() = ConfigHolder.config.relocateEvery
-	internal val BIOME_SCAN_RADIUS get() = ConfigHolder.config.biomeSearchRadius
-	internal val TERRAIN_WAIT_TICKS get() = RELOCATE_WAIT_TICKS
 
 	internal fun mobRegName(idx: Int) =
 		BuiltInRegistries.ENTITY_TYPE.getKey(MOB_ENTRIES[idx].entityType).toString()
@@ -245,9 +244,15 @@ data object AutoCapture {
 		DatasetCapture.autoMode = true
 		DatasetCapture.debugBBMode = false
 
-		if (savedFov != -1) { mc.options.fov().set(savedFov); savedFov = -1 }
-		if (savedRenderDistance != -1) { mc.options.renderDistance().set(savedRenderDistance); savedRenderDistance = -1 }
-		if (savedSimDistance != -1) { mc.options.simulationDistance().set(savedSimDistance); savedSimDistance = -1 }
+		if (savedFov != -1) {
+			mc.options.fov().set(savedFov); savedFov = -1
+		}
+		if (savedRenderDistance != -1) {
+			mc.options.renderDistance().set(savedRenderDistance); savedRenderDistance = -1
+		}
+		if (savedSimDistance != -1) {
+			mc.options.simulationDistance().set(savedSimDistance); savedSimDistance = -1
+		}
 		mc.options.entityShadows().set(savedEntityShadows)
 
 		mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] §fStopped - $mobIndex mobs, $totalShots shots captured"))
@@ -259,11 +264,15 @@ data object AutoCapture {
 
 		if (phase == Phase.CAPTURING) {
 			val dimLabel = if (currentDimension != MobDimension.OVERWORLD) " §8[§7${currentDimension.label}§8]" else ""
-			val icon = when (currentWeather) { "rain" -> "§9☂"; "thunder" -> "§5⚡"; else -> "§a☀" }
+			val icon = when (currentWeather) {
+				"rain" -> "§9☂"; "thunder" -> "§5⚡"; else -> "§a☀"
+			}
 			val hour = (currentTime / 1000L + 6L) % 24L
 			mc.gui.setOverlayMessage(
 				Component.literal(
-					"$icon §f$currentMobName$dimLabel §8| §7shot ${shotCount + 1}/${cfg.shotsPerMob} §8| §7mob ${completedCount + 1}/${MOB_ENTRIES.size} §8| §7%02d:00".format(hour)
+					"$icon §f$currentMobName$dimLabel §8| §7shot ${shotCount + 1}/${cfg.shotsPerMob} §8| §7mob ${completedCount + 1}/${MOB_ENTRIES.size} §8| §7%02d:00".format(
+						hour
+					)
 				), false
 			)
 		}

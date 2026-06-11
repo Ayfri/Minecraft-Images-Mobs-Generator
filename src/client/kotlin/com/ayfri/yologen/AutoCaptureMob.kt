@@ -1,6 +1,7 @@
 package com.ayfri.yologen
 
 import com.ayfri.yologen.config.ConfigHolder
+import net.minecraft.client.Minecraft
 import net.minecraft.core.BlockPos
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.core.registries.Registries
@@ -12,9 +13,14 @@ import net.minecraft.world.InteractionHand
 import net.minecraft.world.effect.MobEffectInstance
 import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.entity.*
-import net.minecraft.world.entity.animal.*
 import net.minecraft.world.entity.animal.axolotl.Axolotl
-import net.minecraft.world.entity.animal.horse.Horse
+import net.minecraft.world.entity.animal.cow.MushroomCow
+import net.minecraft.world.entity.animal.equine.Horse
+import net.minecraft.world.entity.animal.fish.TropicalFish
+import net.minecraft.world.entity.animal.fox.Fox
+import net.minecraft.world.entity.animal.parrot.Parrot
+import net.minecraft.world.entity.animal.rabbit.Rabbit
+import net.minecraft.world.entity.animal.sheep.Sheep
 import net.minecraft.world.item.DyeColor
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
@@ -22,7 +28,7 @@ import net.minecraft.world.level.biome.Biome
 import net.minecraft.world.level.levelgen.Heightmap
 import kotlin.math.*
 import kotlin.random.Random
-import net.minecraft.client.Minecraft
+import net.minecraft.world.entity.animal.equine.Variant as HorseVariant
 
 internal data class BiomeRelocation(
 	val biome: ResourceKey<Biome>,
@@ -69,7 +75,14 @@ internal fun AutoCapture.buildPoolForCurrentDimension(mc: Minecraft) {
 				val result = sLevel.findClosestBiome3d({ it == biomeHolder }, origin, radius, 32, 32)
 				if (result != null) {
 					val pos = result.first
-					pool.add(BiomeRelocation(biomeKey, pos.x.toDouble(), pos.z.toDouble(), tempBucket(biomeHolder.value().baseTemperature)))
+					pool.add(
+						BiomeRelocation(
+							biomeKey,
+							pos.x.toDouble(),
+							pos.z.toDouble(),
+							tempBucket(biomeHolder.value().baseTemperature)
+						)
+					)
 				}
 			} catch (_: Exception) {
 				// biome not found within radius - skip
@@ -88,7 +101,7 @@ internal fun AutoCapture.fallbackRelocation(): Pair<Double, Double> {
 		Random.nextInt(range.first, range.last + 1).toDouble()
 }
 
-internal fun AutoCapture.chooseRelocation(mc: Minecraft): Pair<Double, Double> {
+internal fun AutoCapture.chooseRelocation(): Pair<Double, Double> {
 	if (relocationPool.isNotEmpty()) {
 		val pick = relocationPool[relocationCursor % relocationPool.size]
 		relocationCursor = (relocationCursor + 1) % relocationPool.size
@@ -118,7 +131,8 @@ private fun AutoCapture.netherFloorY(mc: Minecraft, x: Int, z: Int): Double {
 	val level = mc.level ?: return 40.0
 	for (y in 110 downTo 5) {
 		if (!level.getBlockState(BlockPos(x, y, z)).isAir &&
-			level.getBlockState(BlockPos(x, y + 1, z)).isAir) {
+			level.getBlockState(BlockPos(x, y + 1, z)).isAir
+		) {
 			val clearOk = (1..3).all { dy -> level.getBlockState(BlockPos(x, y + dy, z)).isAir }
 			if (clearOk) return (y + 1).toDouble()
 		}
@@ -130,7 +144,12 @@ private fun AutoCapture.netherFloorY(mc: Minecraft, x: Int, z: Int): Double {
  * Finds a clear spawn position with sufficient vertical and horizontal clearance.
  * Prevents mobs from spawning inside walls or under overhangs.
  */
-internal fun AutoCapture.findClearPos(mc: Minecraft, centerX: Double, centerZ: Double, radius: Int = 30): Pair<Double, Double> {
+internal fun AutoCapture.findClearPos(
+	mc: Minecraft,
+	centerX: Double,
+	centerZ: Double,
+	radius: Int = 30
+): Pair<Double, Double> {
 	val level = mc.level ?: return centerX to centerZ
 	val mobHeight = (currentMobEntityType?.height ?: 1.8f)
 
@@ -206,13 +225,15 @@ internal fun AutoCapture.spawnSingleMob(
 	entity.setGlowingTag(true)
 
 	if (cfg.babyAndVariants) {
-		if (Random.nextBoolean()) (entity as? AgeableMob)?.setBaby(true)
+		if (Random.nextBoolean()) (entity as? AgeableMob)?.isBaby = true
 		applyRandomVariant(entity)
 	}
 
 	if (cfg.equipmentAndPoses && entity is Mob) {
-		val armorItems = listOf(Items.IRON_HELMET, Items.IRON_CHESTPLATE, Items.IRON_LEGGINGS, Items.IRON_BOOTS,
-			Items.DIAMOND_HELMET, Items.DIAMOND_CHESTPLATE, Items.GOLDEN_HELMET, Items.LEATHER_CHESTPLATE)
+		val armorItems = listOf(
+			Items.IRON_HELMET, Items.IRON_CHESTPLATE, Items.IRON_LEGGINGS, Items.IRON_BOOTS,
+			Items.DIAMOND_HELMET, Items.DIAMOND_CHESTPLATE, Items.GOLDEN_HELMET, Items.LEATHER_CHESTPLATE
+		)
 		val weaponItems = listOf(Items.IRON_SWORD, Items.BOW, Items.CROSSBOW, Items.TRIDENT, null)
 		val slots = listOf(EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET)
 		slots.forEach { slot ->
@@ -231,14 +252,33 @@ internal fun AutoCapture.spawnSingleMob(
 
 private fun applyRandomVariant(entity: Entity) {
 	when (entity) {
-		is Sheep -> entity.color = DyeColor.entries.random()
-		is Horse -> entity.variant = Horse.Variant.entries.random()
-		is Rabbit -> entity.variant = Rabbit.Variant.entries.filter { it != Rabbit.Variant.THE_KILLER_BUNNY }.random()
-		is Parrot -> entity.variant = Parrot.Variant.entries.random()
-		is Axolotl -> entity.variant = Axolotl.Variant.entries.random()
-		is Fox -> entity.variant = Fox.Type.entries.random()
-		is TropicalFish -> entity.setPackedVariant(TropicalFish.COMMON_VARIANTS.random())
-		is MushroomCow -> entity.setVariant(if (Random.nextBoolean()) MushroomCow.MushroomType.RED else MushroomCow.MushroomType.BROWN)
+		is Sheep -> entity.setColor(DyeColor.entries.random())
+		is Horse -> setVariantReflect(entity, HorseVariant.entries.random())
+		is Rabbit -> setVariantReflect(entity, Rabbit.Variant.entries.filter { it != Rabbit.Variant.EVIL }.random())
+		is Parrot -> setVariantReflect(entity, Parrot.Variant.entries.random())
+		is Axolotl -> setVariantReflect(entity, Axolotl.Variant.entries.random())
+		is Fox -> setVariantReflect(entity, Fox.Variant.entries.random())
+		is TropicalFish -> setPackedVariantReflect(entity, TropicalFish.COMMON_VARIANTS.random().packedId)
+		is MushroomCow -> setVariantReflect(
+			entity,
+			MushroomCow.Variant.entries.filter { it != MushroomCow.Variant.DEFAULT }.random()
+		)
+	}
+}
+
+private fun setVariantReflect(entity: Any, variant: Any) {
+	runCatching {
+		val method = entity.javaClass.declaredMethods.first { it.name == "setVariant" && it.parameterCount == 1 }
+		method.isAccessible = true
+		method.invoke(entity, variant)
+	}
+}
+
+private fun setPackedVariantReflect(entity: TropicalFish, packedId: Int) {
+	runCatching {
+		val method = entity.javaClass.getDeclaredMethod("setPackedVariant", Int::class.javaPrimitiveType)
+		method.isAccessible = true
+		method.invoke(entity, packedId)
 	}
 }
 
@@ -247,7 +287,12 @@ private fun applyRandomVariant(entity: Entity) {
  * a spawn Triple(x, y, z) positioned inside the water column.
  * Returns null if no loaded water found (caller should retry next tick).
  */
-internal fun AutoCapture.findWaterPos(mc: Minecraft, centerX: Double, centerZ: Double, radius: Int = 24): Triple<Double, Double, Double>? {
+internal fun AutoCapture.findWaterPos(
+	mc: Minecraft,
+	centerX: Double,
+	centerZ: Double,
+	radius: Int = 24
+): Triple<Double, Double, Double>? {
 	val level = mc.level ?: return null
 	repeat(40) {
 		val x = centerX + Random.nextDouble(-radius.toDouble(), radius.toDouble())
@@ -282,7 +327,7 @@ internal fun AutoCapture.spawnMobEntity(mc: Minecraft, x: Double, y: Double, z: 
 				val ex = x + cos(angle) * dist
 				val ez = z + sin(angle) * dist
 				val ey = if (isAquatic) y + Random.nextDouble(-2.0, 2.0)
-				         else loadedSurfaceYServer(sLevel, ex.toInt(), ez.toInt()) ?: y
+				else loadedSurfaceYServer(sLevel, ex.toInt(), ez.toInt()) ?: y
 				spawnSingleMob(sLevel, mc, ex, ey, ez, currentMobEntityType ?: return@execute, cfg)
 			}
 		}

@@ -2,7 +2,6 @@ package com.ayfri.yologen
 
 import com.ayfri.yologen.config.ConfigHolder
 import com.mojang.blaze3d.platform.NativeImage
-import kotlin.math.sqrt
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
 import net.minecraft.client.Minecraft
 import net.minecraft.client.Screenshot
@@ -10,6 +9,7 @@ import java.io.File
 import java.io.FileWriter
 import java.util.*
 import java.util.concurrent.Executors
+import kotlin.math.sqrt
 
 private const val FRAMES_CSV_HEADER = "frame,mob,weather,time_ticks,shot,mob_idx,mob_x,mob_y,mob_z"
 private const val BOXES_CSV_HEADER = "frame,class_id,cx,cy,w,h,dist_blocks"
@@ -77,7 +77,7 @@ data object DatasetCapture {
 			val boxes: List<YoloBox>
 			if (!autoMode && AutoCapture.running) {
 				val classId = YOLO_CLASS_MAP[AutoCapture.currentMobEntityType]
-				if (classId != null) {
+				if (classId != null && !cfg.multipleMobsPerFrame) {
 					val player = mc.player ?: return@register
 					val dx = AutoCapture.mobX - player.x
 					val dy = (AutoCapture.mobY + 1.0) - player.eyeY
@@ -94,7 +94,7 @@ data object DatasetCapture {
 						if (boxes.isEmpty()) return@register
 					}
 				} else {
-					// Multi-mob diversity: AABB per entity
+					// Multi-mob per frame or multi-mob diversity: AABB per entity for individual boxes
 					val levelState = context.levelState()
 					val camera = levelState.cameraRenderState
 					boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
@@ -133,16 +133,20 @@ data object DatasetCapture {
 										compositeOver(main, trans)
 									}
 								}
-								writeCapture(main, boxes, metadata, name, gameDir,
-									targetW, targetH, cropX, cropY, cropW, cropH)
+								writeCapture(
+									main, boxes, metadata, name, gameDir,
+									targetW, targetH, cropX, cropY, cropW, cropH
+								)
 							}
 						}
 					}
 				} else {
 					ioExecutor.submit {
 						mainImg.use { img ->
-							writeCapture(img, boxes, metadata, name, gameDir,
-								targetW, targetH, cropX, cropY, cropW, cropH)
+							writeCapture(
+								img, boxes, metadata, name, gameDir,
+								targetW, targetH, cropX, cropY, cropW, cropH
+							)
 						}
 					}
 				}
@@ -216,7 +220,9 @@ data object DatasetCapture {
 				val s = srcPx[row + x]
 				val alpha = (s ushr 24) and 0xFF
 				if (alpha == 0) continue
-				if (alpha == 255) { dst.setPixelABGR(x, y, s); continue }
+				if (alpha == 255) {
+					dst.setPixelABGR(x, y, s); continue
+				}
 				val d = dstPx[row + x]
 				val t = alpha / 255f
 				val r = ((s and 0xFF) * t + (d and 0xFF) * (1f - t)).toInt()

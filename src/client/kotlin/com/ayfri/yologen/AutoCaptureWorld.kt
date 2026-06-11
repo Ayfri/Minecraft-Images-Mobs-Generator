@@ -2,9 +2,10 @@ package com.ayfri.yologen
 
 import net.minecraft.client.Minecraft
 import net.minecraft.core.registries.Registries
+import net.minecraft.resources.ResourceKey
 import net.minecraft.server.level.ServerPlayer
-import net.minecraft.world.entity.Relative
 import net.minecraft.world.clock.WorldClocks
+import net.minecraft.world.entity.Relative
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.chunk.status.ChunkStatus
 import net.minecraft.world.level.gamerules.GameRules
@@ -56,17 +57,6 @@ internal fun AutoCapture.applyInstantWeather(mc: Minecraft, weather: String) {
 	mc.player?.connection?.sendCommand("weather $weather")
 }
 
-/** Moves the CLIENT player directly (no round-trip) and syncs the server async. */
-internal fun AutoCapture.teleportPlayerDirect(mc: Minecraft, x: Double, y: Double, z: Double) {
-	mc.player?.snapTo(x, y, z)
-	val server = mc.singleplayerServer
-	if (server != null) {
-		server.execute { serverPlayer(mc)?.teleportTo(x, y, z) }
-	} else {
-		mc.player?.connection?.sendCommand("tp @s ${x.fmt()} ${y.fmt()} ${z.fmt()}")
-	}
-}
-
 /** Cross-dimension teleport for phase transitions. */
 internal fun AutoCapture.teleportPlayerToDimension(mc: Minecraft, x: Double, y: Double, z: Double) {
 	val server = mc.singleplayerServer
@@ -97,18 +87,23 @@ internal fun AutoCapture.preloadPosition(mc: Minecraft, x: Double, z: Double) {
  * Only kicks off generation; the actual teleport happens at setupTick==0.
  */
 internal fun AutoCapture.preloadNextSetupPosition(mc: Minecraft, targetDimKey: ResourceKey<Level>) {
-    val server = mc.singleplayerServer ?: return
-    if (targetDimKey != currentDimensionKey) return  // cross-dimension: skip, player teleport handles it
-    val nx = nextSetupBaseX ?: return
-    val nz = nextSetupBaseZ ?: return
-    val cx = nx.toChunkCoord()
-    val cz = nz.toChunkCoord()
-    server.execute {
-        val sLevel = server.getLevel(targetDimKey) ?: return@execute
-        for (dx in -PRELOAD_CHUNK_RADIUS..PRELOAD_CHUNK_RADIUS)
-            for (dz in -PRELOAD_CHUNK_RADIUS..PRELOAD_CHUNK_RADIUS)
-                sLevel.chunkSource.getChunk(cx + dx, cz + dz, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true)
-    }
+	val server = mc.singleplayerServer ?: return
+	if (targetDimKey != currentDimensionKey) return  // cross-dimension: skip, player teleport handles it
+	val nx = nextSetupBaseX ?: return
+	val nz = nextSetupBaseZ ?: return
+	val cx = nx.toChunkCoord()
+	val cz = nz.toChunkCoord()
+	server.execute {
+		val sLevel = server.getLevel(targetDimKey) ?: return@execute
+		for (dx in -PRELOAD_CHUNK_RADIUS..PRELOAD_CHUNK_RADIUS)
+			for (dz in -PRELOAD_CHUNK_RADIUS..PRELOAD_CHUNK_RADIUS)
+				sLevel.chunkSource.getChunk(
+					cx + dx,
+					cz + dz,
+					ChunkStatus.FULL,
+					true
+				)
+	}
 }
 
 internal fun AutoCapture.clearMobFire(mc: Minecraft) {
@@ -119,7 +114,13 @@ internal fun AutoCapture.clearMobFire(mc: Minecraft) {
 	}
 }
 
-internal fun AutoCapture.setGameRulesDirect(mc: Minecraft, spawnMobs: Boolean, advTime: Boolean, advWeather: Boolean, randomTick: Int) {
+internal fun AutoCapture.setGameRulesDirect(
+	mc: Minecraft,
+	spawnMobs: Boolean,
+	advTime: Boolean,
+	advWeather: Boolean,
+	randomTick: Int
+) {
 	val server = mc.singleplayerServer
 	if (server != null) {
 		server.execute {

@@ -15,7 +15,8 @@ internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Doubl
 	val tier = shotIdx / TIER_SIZE
 	val relocateEvery = cfg.relocateEvery
 	val baseAngle = (shotIdx % relocateEvery).toDouble() / relocateEvery * 2 * PI
-	val jitter = if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
+	val jitter =
+		if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
 	val angle = baseAngle + Random.nextDouble(-jitter, jitter)
 	return when (tier) {
 		0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))
@@ -38,7 +39,8 @@ private fun AutoCapture.aquaticOrbitParams(shotIdx: Int): Triple<Double, Double,
 	val cfg = ConfigHolder.config
 	val relocateEvery = cfg.relocateEvery
 	val baseAngle = (shotIdx % relocateEvery).toDouble() / relocateEvery * 2 * PI
-	val jitter = if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
+	val jitter =
+		if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
 	val angle = baseAngle + Random.nextDouble(-jitter, jitter)
 	return when (shotIdx % 7) {
 		0 -> Triple(angle, Random.nextDouble(2.0, 4.0), Random.nextDouble(-2.5, -0.5))  // close, below mob, looking up
@@ -46,7 +48,11 @@ private fun AutoCapture.aquaticOrbitParams(shotIdx: Int): Triple<Double, Double,
 		2 -> Triple(angle, Random.nextDouble(2.5, 5.0), Random.nextDouble(0.5, 2.0))    // slightly above, looking down
 		3 -> Triple(angle, Random.nextDouble(4.0, 8.0), Random.nextDouble(-3.5, -1.0))  // far side, deep, looking up
 		4 -> Triple(angle, Random.nextDouble(1.5, 3.0), Random.nextDouble(-4.0, -2.0))  // very close and deep
-		5 -> Triple(angle, Random.nextDouble(5.0, 10.0), Random.nextDouble(2.0, 5.0))   // above water surface, bird's eye
+		5 -> Triple(
+			angle,
+			Random.nextDouble(5.0, 10.0),
+			Random.nextDouble(2.0, 5.0)
+		)   // above water surface, bird's eye
 		else -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(-1.5, 1.5)) // varied mid-range
 	}
 }
@@ -74,7 +80,9 @@ internal fun AutoCapture.updateMobPosition(mc: Minecraft) {
 		?.filter { it != mc.player } ?: return
 	val nearest = entities.minByOrNull { (it.x - mobX).pow(2) + (it.z - mobZ).pow(2) } ?: return
 	val dist2 = (nearest.x - mobX).pow(2) + (nearest.z - mobZ).pow(2)
-	if (dist2 < 900.0) { mobX = nearest.x; mobY = nearest.y; mobZ = nearest.z }
+	if (dist2 < 900.0) {
+		mobX = nearest.x; mobY = nearest.y; mobZ = nearest.z
+	}
 }
 
 /**

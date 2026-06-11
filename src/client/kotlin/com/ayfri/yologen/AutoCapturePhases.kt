@@ -5,8 +5,10 @@ import net.minecraft.client.Minecraft
 import net.minecraft.network.chat.Component
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.level.GameType
-import net.minecraft.world.level.Level
-import kotlin.math.*
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 internal fun AutoCapture.tickSetup(mc: Minecraft) {
@@ -84,7 +86,7 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 
 			if (shotCount > 0 && shotCount % cfg.relocateEvery == 0 && lastRelocatedAtShot != shotCount) {
 				lastRelocatedAtShot = shotCount
-				val relocation = nextRelocation ?: chooseRelocation(mc)
+				val relocation = nextRelocation ?: chooseRelocation()
 				pendingMobSurfaceSnap = relocation
 				preloadPosition(mc, relocation.first, relocation.second)
 				terrainWaitTick = RELOCATE_WAIT_TICKS
@@ -94,7 +96,8 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 
 			currentWeather = weatherForShot(shotCount)
 			currentTime = if (cfg.cameraJitterAndLighting) {
-				(baseTime + shotCount * cfg.timePerShot + Random.nextLong(-2000, 2000)).rem(24000).let { if (it < 0) it + 24000 else it }
+				(baseTime + shotCount * cfg.timePerShot + Random.nextLong(-2000, 2000)).rem(24000)
+					.let { if (it < 0) it + 24000 else it }
 			} else {
 				(baseTime + shotCount * cfg.timePerShot) % 24000L
 			}
@@ -102,13 +105,15 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 			applyInstantWeather(mc, currentWeather)
 
 			if ((shotCount + 1) % cfg.relocateEvery == 0 && nextRelocation == null) {
-				nextRelocation = chooseRelocation(mc)
+				nextRelocation = chooseRelocation()
 				forceServerChunksAround(mc, nextRelocation!!.first.toInt(), nextRelocation!!.second.toInt())
 			}
 
 			val (angle, dist, heightOffset) = orbitParams(shotCount)
-			val jitterYaw = if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees * 2 - cfg.cameraJitterDegrees else 0f
-			val jitterPitch = if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees - cfg.cameraJitterDegrees / 2 else 0f
+			val jitterYaw =
+				if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees * 2 - cfg.cameraJitterDegrees else 0f
+			val jitterPitch =
+				if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees - cfg.cameraJitterDegrees / 2 else 0f
 
 			val px = mobX + cos(angle) * dist
 			val pz = mobZ + sin(angle) * dist
@@ -119,7 +124,9 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 				maxOf(safeSurfaceY(mc, px.toInt(), pz.toInt()), mobY) + heightOffset
 			}
 
-			val dx = mobX - px; val dy = (mobY + 1.0) - py; val dz = mobZ - pz
+			val dx = mobX - px
+			val dy = (mobY + 1.0) - py
+			val dz = mobZ - pz
 			val h = sqrt(dx * dx + dz * dz)
 			targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat() + jitterYaw
 			targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat() + jitterPitch
