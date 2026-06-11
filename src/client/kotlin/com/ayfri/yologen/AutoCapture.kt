@@ -119,6 +119,7 @@ data object AutoCapture {
 
 	internal val hasNextRelocation get() = nextRelocation != null
 	internal val relocationPoolSize get() = relocationPool.size
+	internal val currentMobIsAquatic get() = mobIndex < MOB_ENTRIES.size && MOB_ENTRIES[mobIndex].aquatic
 
 	internal enum class Phase { IDLE, SETUP, CAPTURING }
 

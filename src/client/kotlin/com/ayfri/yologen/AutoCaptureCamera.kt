@@ -10,6 +10,7 @@ import kotlin.math.*
 import kotlin.random.Random
 
 internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Double> {
+	if (currentMobIsAquatic) return aquaticOrbitParams(shotIdx)
 	val cfg = ConfigHolder.config
 	val tier = shotIdx / TIER_SIZE
 	val relocateEvery = cfg.relocateEvery
@@ -24,6 +25,29 @@ internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Doubl
 		4 -> Triple(angle, Random.nextDouble(6.0, 11.0), Random.nextDouble(2.5, 6.0))
 		5 -> Triple(angle, Random.nextDouble(10.0, 17.0), Random.nextDouble(0.5, 3.0))
 		else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0))
+	}
+}
+
+/**
+ * Orbit params for aquatic mobs: camera stays inside the water column.
+ * heightOffset is relative to mobY, so negative = below mob, positive = above.
+ * The angles cover: side/eye-level, below looking up, shallow above, and
+ * a few shots from just above the water surface looking down.
+ */
+private fun AutoCapture.aquaticOrbitParams(shotIdx: Int): Triple<Double, Double, Double> {
+	val cfg = ConfigHolder.config
+	val relocateEvery = cfg.relocateEvery
+	val baseAngle = (shotIdx % relocateEvery).toDouble() / relocateEvery * 2 * PI
+	val jitter = if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
+	val angle = baseAngle + Random.nextDouble(-jitter, jitter)
+	return when (shotIdx % 7) {
+		0 -> Triple(angle, Random.nextDouble(2.0, 4.0), Random.nextDouble(-2.5, -0.5))  // close, below mob, looking up
+		1 -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(-0.5, 0.5))   // side, eye level
+		2 -> Triple(angle, Random.nextDouble(2.5, 5.0), Random.nextDouble(0.5, 2.0))    // slightly above, looking down
+		3 -> Triple(angle, Random.nextDouble(4.0, 8.0), Random.nextDouble(-3.5, -1.0))  // far side, deep, looking up
+		4 -> Triple(angle, Random.nextDouble(1.5, 3.0), Random.nextDouble(-4.0, -2.0))  // very close and deep
+		5 -> Triple(angle, Random.nextDouble(5.0, 10.0), Random.nextDouble(2.0, 5.0))   // above water surface, bird's eye
+		else -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(-1.5, 1.5)) // varied mid-range
 	}
 }
 

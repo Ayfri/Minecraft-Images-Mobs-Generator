@@ -7,10 +7,15 @@ import net.minecraft.core.registries.Registries
 import net.minecraft.resources.ResourceKey
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
+import net.minecraft.tags.FluidTags
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.effect.MobEffectInstance
 import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.entity.*
+import net.minecraft.world.entity.animal.*
+import net.minecraft.world.entity.animal.axolotl.Axolotl
+import net.minecraft.world.entity.animal.horse.Horse
+import net.minecraft.world.item.DyeColor
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
 import net.minecraft.world.level.biome.Biome
@@ -200,8 +205,9 @@ internal fun AutoCapture.spawnSingleMob(
 	entity.addTag(MOB_TAG)
 	entity.setGlowingTag(true)
 
-	if (cfg.babyAndVariants && cfg.shotsPerMob > 1) {
-		if (shotCount % 2 == 1) (entity as? AgeableMob)?.setBaby(true)
+	if (cfg.babyAndVariants) {
+		if (Random.nextBoolean()) (entity as? AgeableMob)?.setBaby(true)
+		applyRandomVariant(entity)
 	}
 
 	if (cfg.equipmentAndPoses && entity is Mob) {
@@ -223,6 +229,41 @@ internal fun AutoCapture.spawnSingleMob(
 	sLevel.addFreshEntity(entity)
 }
 
+private fun applyRandomVariant(entity: Entity) {
+	when (entity) {
+		is Sheep -> entity.color = DyeColor.entries.random()
+		is Horse -> entity.variant = Horse.Variant.entries.random()
+		is Rabbit -> entity.variant = Rabbit.Variant.entries.filter { it != Rabbit.Variant.THE_KILLER_BUNNY }.random()
+		is Parrot -> entity.variant = Parrot.Variant.entries.random()
+		is Axolotl -> entity.variant = Axolotl.Variant.entries.random()
+		is Fox -> entity.variant = Fox.Type.entries.random()
+		is TropicalFish -> entity.setPackedVariant(TropicalFish.COMMON_VARIANTS.random())
+		is MushroomCow -> entity.setVariant(if (Random.nextBoolean()) MushroomCow.MushroomType.RED else MushroomCow.MushroomType.BROWN)
+	}
+}
+
+/**
+ * Scans for a water block within [radius] of (centerX, centerZ) and returns
+ * a spawn Triple(x, y, z) positioned inside the water column.
+ * Returns null if no loaded water found (caller should retry next tick).
+ */
+internal fun AutoCapture.findWaterPos(mc: Minecraft, centerX: Double, centerZ: Double, radius: Int = 24): Triple<Double, Double, Double>? {
+	val level = mc.level ?: return null
+	repeat(40) {
+		val x = centerX + Random.nextDouble(-radius.toDouble(), radius.toDouble())
+		val z = centerZ + Random.nextDouble(-radius.toDouble(), radius.toDouble())
+		if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) return@repeat
+		val surfY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x.toInt(), z.toInt())
+		for (y in surfY downTo maxOf(surfY - 30, 20)) {
+			if (level.getFluidState(BlockPos(x.toInt(), y, z.toInt())).`is`(FluidTags.WATER)) {
+				val depth = Random.nextInt(1, 4)
+				return Triple(x, (y - depth).toDouble(), z)
+			}
+		}
+	}
+	return null
+}
+
 internal fun AutoCapture.spawnMobEntity(mc: Minecraft, x: Double, y: Double, z: Double) {
 	val server = mc.singleplayerServer ?: return
 	val cfg = ConfigHolder.config
@@ -234,12 +275,14 @@ internal fun AutoCapture.spawnMobEntity(mc: Minecraft, x: Double, y: Double, z: 
 
 		if (cfg.multipleMobsPerFrame && cfg.extraMobsCount > 1) {
 			val extra = Random.nextInt(0, cfg.extraMobsCount)
+			val isAquatic = currentMobIsAquatic
 			repeat(extra) {
 				val angle = Random.nextDouble(0.0, 2.0 * PI)
 				val dist = Random.nextDouble(2.0, 6.0)
 				val ex = x + cos(angle) * dist
 				val ez = z + sin(angle) * dist
-				val ey = loadedSurfaceYServer(sLevel, ex.toInt(), ez.toInt()) ?: y
+				val ey = if (isAquatic) y + Random.nextDouble(-2.0, 2.0)
+				         else loadedSurfaceYServer(sLevel, ex.toInt(), ez.toInt()) ?: y
 				spawnSingleMob(sLevel, mc, ex, ey, ez, currentMobEntityType ?: return@execute, cfg)
 			}
 		}
@@ -247,18 +290,32 @@ internal fun AutoCapture.spawnMobEntity(mc: Minecraft, x: Double, y: Double, z: 
 }
 
 internal fun AutoCapture.spawnMobOnLoadedSurface(mc: Minecraft): Boolean {
-	val surfY = loadedSurfaceY(mc, baseX, baseZ) ?: return false
-	safeY = surfY
-	teleportPlayerToDimension(mc, baseX.toDouble(), surfY, baseZ.toDouble())
-
 	val entry = MOB_ENTRIES[mobIndex]
 	currentMobEntityType = entry.entityType
 	currentMobRegName = BuiltInRegistries.ENTITY_TYPE.getKey(entry.entityType).toString()
 	currentMobName = currentMobRegName.substringAfter(':')
-	val (clearMobX, clearMobZ) = findClearPos(mc, baseX.toDouble(), baseZ.toDouble())
-	mobX = clearMobX
-	mobZ = clearMobZ
-	mobY = loadedSurfaceY(mc, mobX.toInt(), mobZ.toInt()) ?: surfY
+
+	val surfY = loadedSurfaceY(mc, baseX, baseZ) ?: return false
+	safeY = surfY
+	if (entry.aquatic) {
+		val waterPos = findWaterPos(mc, baseX.toDouble(), baseZ.toDouble())
+		if (waterPos != null) {
+			val (wx, wy, wz) = waterPos
+			safeY = wy
+			teleportPlayerToDimension(mc, wx, wy, wz)
+			mobX = wx; mobY = wy; mobZ = wz
+		} else {
+			teleportPlayerToDimension(mc, baseX.toDouble(), surfY, baseZ.toDouble())
+			val (clearMobX, clearMobZ) = findClearPos(mc, baseX.toDouble(), baseZ.toDouble())
+			mobX = clearMobX; mobZ = clearMobZ
+			mobY = loadedSurfaceY(mc, mobX.toInt(), mobZ.toInt()) ?: surfY
+		}
+	} else {
+		teleportPlayerToDimension(mc, baseX.toDouble(), surfY, baseZ.toDouble())
+		val (clearMobX, clearMobZ) = findClearPos(mc, baseX.toDouble(), baseZ.toDouble())
+		mobX = clearMobX; mobZ = clearMobZ
+		mobY = loadedSurfaceY(mc, mobX.toInt(), mobZ.toInt()) ?: surfY
+	}
 
 	if (mc.singleplayerServer != null) {
 		spawnMobEntity(mc, mobX, mobY, mobZ)
@@ -279,22 +336,33 @@ internal fun AutoCapture.snapMobToLoadedSurface(mc: Minecraft, x: Double, z: Dou
 	val level = mc.level ?: return false
 	forceServerChunksAround(mc, x.toInt(), z.toInt(), radius = 1)
 	if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) return false
-	val (clearX, clearZ) = findClearPos(mc, x, z)
-	val y = loadedSurfaceY(mc, clearX.toInt(), clearZ.toInt()) ?: return false
+
+	val (finalX, finalY, finalZ) = if (currentMobIsAquatic) {
+		findWaterPos(mc, x, z) ?: run {
+			val (clearX, clearZ) = findClearPos(mc, x, z)
+			val y = loadedSurfaceY(mc, clearX.toInt(), clearZ.toInt()) ?: return false
+			Triple(clearX, y, clearZ)
+		}
+	} else {
+		val (clearX, clearZ) = findClearPos(mc, x, z)
+		val y = loadedSurfaceY(mc, clearX.toInt(), clearZ.toInt()) ?: return false
+		Triple(clearX, y, clearZ)
+	}
+
 	if (mc.singleplayerServer != null) {
-		spawnMobEntity(mc, clearX, y, clearZ)
+		spawnMobEntity(mc, finalX, finalY, finalZ)
 	} else {
 		val conn = mc.player?.connection ?: return false
 		conn.sendCommand("kill @e[type=!player]")
 		conn.sendCommand(
-			"summon $currentMobRegName ${clearX.fmt()} ${y.fmt()} ${clearZ.fmt()} " +
+			"summon $currentMobRegName ${finalX.fmt()} ${finalY.fmt()} ${finalZ.fmt()} " +
 				"{Invulnerable:1b,NoAI:1b,Tags:[\"$MOB_TAG\"],Glowing:1b," +
 				"active_effects:[{id:\"minecraft:fire_resistance\",duration:-1,amplifier:0,ambient:0b,show_particles:0b,show_icon:0b}]}"
 		)
 	}
-	mobX = clearX; mobY = y; mobZ = clearZ
+	mobX = finalX; mobY = finalY; mobZ = finalZ
 	nextRelocation = null
 	pendingMobSurfaceSnap = null
-	safeY = y
+	safeY = finalY
 	return true
 }

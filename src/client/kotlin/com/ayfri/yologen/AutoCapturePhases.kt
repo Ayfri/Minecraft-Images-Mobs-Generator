@@ -112,7 +112,12 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 
 			val px = mobX + cos(angle) * dist
 			val pz = mobZ + sin(angle) * dist
-			val py = maxOf(safeSurfaceY(mc, px.toInt(), pz.toInt()), mobY) + heightOffset
+			val py = if (currentMobIsAquatic) {
+				// Orbit directly around mobY so the camera can be underwater
+				(mobY + heightOffset).coerceAtLeast(mobY - 6.0)
+			} else {
+				maxOf(safeSurfaceY(mc, px.toInt(), pz.toInt()), mobY) + heightOffset
+			}
 
 			val dx = mobX - px; val dy = (mobY + 1.0) - py; val dz = mobZ - pz
 			val h = sqrt(dx * dx + dz * dz)
