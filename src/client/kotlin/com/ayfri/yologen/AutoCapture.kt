@@ -2,13 +2,13 @@ package com.ayfri.yologen
 
 import com.ayfri.yologen.config.ConfigHolder
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
+import net.minecraft.client.InactivityFpsLimit
 import net.minecraft.client.Minecraft
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.network.chat.Component
 import net.minecraft.resources.ResourceKey
 import net.minecraft.world.entity.EntityType
 import net.minecraft.world.level.Level
-import java.util.*
 import kotlin.math.roundToInt
 
 internal enum class WeatherPhase(val label: String) {
@@ -51,9 +51,6 @@ internal val MobDimension.label: String
 		MobDimension.END -> "End"
 	}
 
-internal fun Double.fmt(decimals: Int = 2) = String.format(Locale.ROOT, "%.${decimals}f", this)
-internal fun Int.toChunkCoord() = floorDiv(16)
-
 data object AutoCapture {
 	internal const val MOB_TAG = "yologen_mob"
 	internal const val MOB_SPAWN_TICK = 35
@@ -87,8 +84,8 @@ data object AutoCapture {
 
 	internal var completedMobs = emptySet<String>()
 	internal var baseTime = 0L
-	internal var subTick = 0
 	internal var completedWithoutImage = 0
+	internal var pendingNegativeShot = false
 	internal var currentDimensionKey: ResourceKey<Level> = Level.OVERWORLD
 	internal var baseX = 0
 	internal var baseZ = 0
@@ -118,6 +115,10 @@ data object AutoCapture {
 	private var savedRenderDistance = -1
 	private var savedSimDistance = -1
 	private var savedEntityShadows = true
+	private var savedVsync = true
+	private var savedFramerateLimit = 120
+	private var savedInactivityFpsLimit: InactivityFpsLimit = InactivityFpsLimit.MINIMIZED
+	private var savedTickRate = 20f
 
 	internal val hasNextRelocation get() = nextRelocation != null
 	internal val relocationPoolSize get() = relocationPool.size
@@ -149,12 +150,12 @@ data object AutoCapture {
 
 	internal fun resetShotState() {
 		shotCount = 0
-		subTick = 0
 		terrainWaitTick = 0
 		lastRelocatedAtShot = -1
 		mobSpawned = false
 		nextRelocation = null
 		pendingMobSurfaceSnap = null
+		pendingNegativeShot = false
 		relocationCursor = 0
 		currentMobEntityType = null
 		completedWithoutImage = 0
@@ -168,7 +169,6 @@ data object AutoCapture {
 	}
 
 	internal fun resetDimPhaseState() {
-		subTick = 0
 		terrainWaitTick = 0
 		lastRelocatedAtShot = -1
 		mobSpawned = false
@@ -221,6 +221,17 @@ data object AutoCapture {
 		mc.options.simulationDistance().set(cfg.captureRenderDistance)
 		savedEntityShadows = mc.options.entityShadows().get()
 		mc.options.entityShadows().set(false)
+		savedVsync = mc.options.enableVsync().get()
+		mc.options.enableVsync().set(false)
+		savedFramerateLimit = mc.options.framerateLimit().get()
+		mc.options.framerateLimit().set(260)
+		savedInactivityFpsLimit = mc.options.inactivityFpsLimit().get()
+		mc.options.inactivityFpsLimit().set(InactivityFpsLimit.MINIMIZED)
+		val server = mc.singleplayerServer
+		if (server != null && cfg.captureTickRate > 20f) {
+			savedTickRate = server.tickRateManager().tickrate()
+			server.execute { server.tickRateManager().setTickRate(cfg.captureTickRate) }
+		}
 
 		val wDesc = "60%☀ 20%☂ 20%⚡"
 		val resumeMsg = if (completedMobs.isNotEmpty())
@@ -253,6 +264,14 @@ data object AutoCapture {
 			mc.options.simulationDistance().set(savedSimDistance); savedSimDistance = -1
 		}
 		mc.options.entityShadows().set(savedEntityShadows)
+		mc.options.enableVsync().set(savedVsync)
+		mc.options.framerateLimit().set(savedFramerateLimit)
+		mc.options.inactivityFpsLimit().set(savedInactivityFpsLimit)
+		val server = mc.singleplayerServer
+		if (server != null && savedTickRate > 0f) {
+			server.execute { server.tickRateManager().setTickRate(savedTickRate) }
+			savedTickRate = 20f
+		}
 
 		mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] §fStopped - $mobIndex mobs, $totalShots shots captured"))
 		setGameRulesDirect(mc, spawnMobs = true, advTime = true, advWeather = true, randomTick = 3)
