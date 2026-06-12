@@ -9,9 +9,19 @@ import net.minecraft.world.phys.Vec3
 import kotlin.math.*
 import kotlin.random.Random
 
+/** Scale factor for orbit distances derived from mob AABB size vs reference (zombie ~1.8m tall). */
+internal val AutoCapture.mobSizeScale: Double
+	get() {
+		val type = currentMobEntityType ?: return 1.0
+		// Max of height and 2×width so wide mobs (Ender Dragon, Ghast) also step back.
+		val effectiveSize = maxOf(type.height, type.width * 2f).toDouble()
+		return (effectiveSize / 1.8).coerceIn(0.4, 7.0)
+	}
+
 internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Double> {
 	if (currentMobIsAquatic) return aquaticOrbitParams(shotIdx)
 	val cfg = ConfigHolder.config
+	val s = mobSizeScale
 	val tier = shotIdx / TIER_SIZE
 	val relocateEvery = cfg.relocateEvery
 	val baseAngle = (shotIdx % relocateEvery).toDouble() / relocateEvery * 2 * PI
@@ -19,13 +29,13 @@ internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Doubl
 		if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
 	val angle = baseAngle + Random.nextDouble(-jitter, jitter)
 	return when (tier) {
-		0 -> Triple(angle, Random.nextDouble(2.5, 5.5), Random.nextDouble(0.3, 1.5))
-		1 -> Triple(angle, Random.nextDouble(5.0, 9.0), Random.nextDouble(1.0, 3.0))
-		2 -> Triple(angle, Random.nextDouble(9.0, 15.0), Random.nextDouble(1.5, 4.0))
-		3 -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(0.3, 2.0))
-		4 -> Triple(angle, Random.nextDouble(6.0, 11.0), Random.nextDouble(2.5, 6.0))
-		5 -> Triple(angle, Random.nextDouble(10.0, 17.0), Random.nextDouble(0.5, 3.0))
-		else -> Triple(angle, Random.nextDouble(2.0, 5.0), Random.nextDouble(8.0, 14.0))
+		0 -> Triple(angle, Random.nextDouble(2.5, 5.5) * s, Random.nextDouble(0.3, 1.5) * s)
+		1 -> Triple(angle, Random.nextDouble(5.0, 9.0) * s, Random.nextDouble(1.0, 3.0) * s)
+		2 -> Triple(angle, Random.nextDouble(9.0, 15.0) * s, Random.nextDouble(1.5, 4.0) * s)
+		3 -> Triple(angle, Random.nextDouble(3.0, 6.0) * s, Random.nextDouble(0.3, 2.0) * s)
+		4 -> Triple(angle, Random.nextDouble(6.0, 11.0) * s, Random.nextDouble(2.5, 6.0) * s)
+		5 -> Triple(angle, Random.nextDouble(10.0, 17.0) * s, Random.nextDouble(0.5, 3.0) * s)
+		else -> Triple(angle, Random.nextDouble(2.0, 5.0) * s, Random.nextDouble(8.0, 14.0) * s)
 	}
 }
 
@@ -37,23 +47,20 @@ internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Doubl
  */
 private fun AutoCapture.aquaticOrbitParams(shotIdx: Int): Triple<Double, Double, Double> {
 	val cfg = ConfigHolder.config
+	val s = mobSizeScale
 	val relocateEvery = cfg.relocateEvery
 	val baseAngle = (shotIdx % relocateEvery).toDouble() / relocateEvery * 2 * PI
 	val jitter =
 		if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
 	val angle = baseAngle + Random.nextDouble(-jitter, jitter)
 	return when (shotIdx % 7) {
-		0 -> Triple(angle, Random.nextDouble(2.0, 4.0), Random.nextDouble(-2.5, -0.5))  // close, below mob, looking up
-		1 -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(-0.5, 0.5))   // side, eye level
-		2 -> Triple(angle, Random.nextDouble(2.5, 5.0), Random.nextDouble(0.5, 2.0))    // slightly above, looking down
-		3 -> Triple(angle, Random.nextDouble(4.0, 8.0), Random.nextDouble(-3.5, -1.0))  // far side, deep, looking up
-		4 -> Triple(angle, Random.nextDouble(1.5, 3.0), Random.nextDouble(-4.0, -2.0))  // very close and deep
-		5 -> Triple(
-			angle,
-			Random.nextDouble(5.0, 10.0),
-			Random.nextDouble(2.0, 5.0)
-		)   // above water surface, bird's eye
-		else -> Triple(angle, Random.nextDouble(3.0, 6.0), Random.nextDouble(-1.5, 1.5)) // varied mid-range
+		0 -> Triple(angle, Random.nextDouble(2.0, 4.0) * s, Random.nextDouble(-2.5, -0.5) * s)
+		1 -> Triple(angle, Random.nextDouble(3.0, 6.0) * s, Random.nextDouble(-0.5, 0.5) * s)
+		2 -> Triple(angle, Random.nextDouble(2.5, 5.0) * s, Random.nextDouble(0.5, 2.0) * s)
+		3 -> Triple(angle, Random.nextDouble(4.0, 8.0) * s, Random.nextDouble(-3.5, -1.0) * s)
+		4 -> Triple(angle, Random.nextDouble(1.5, 3.0) * s, Random.nextDouble(-4.0, -2.0) * s)
+		5 -> Triple(angle, Random.nextDouble(5.0, 10.0) * s, Random.nextDouble(2.0, 5.0) * s)
+		else -> Triple(angle, Random.nextDouble(3.0, 6.0) * s, Random.nextDouble(-1.5, 1.5) * s)
 	}
 }
 
