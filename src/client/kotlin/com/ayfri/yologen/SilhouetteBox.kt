@@ -44,8 +44,12 @@ fun readSilhouetteBox(mc: Minecraft, classId: Int, dist: Float): YoloBox? {
 			for (y in 0 until h) {
 				val row = y * w
 				for (x in 0 until w) {
-					val alpha = (pixels[row + x] ushr 24) and 0xFF
-					if (alpha > 0) {
+					// Screenshot.takeScreenshot forces alpha=0xFF on every pixel (argb | 0xFF000000),
+					// so alpha is useless as a discriminator. The outline buffer clears to black
+					// (0x00000000 → stored as 0xFF000000 after the force), and entity pixels carry
+					// a non-black team colour. Check the RGB channels instead.
+					val pixel = pixels[row + x]
+					if ((pixel and 0x00FFFFFF) != 0) {
 						if (x < minX) minX = x
 						if (y < minY) minY = y
 						if (x > maxX) maxX = x

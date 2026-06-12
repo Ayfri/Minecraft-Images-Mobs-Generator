@@ -1,6 +1,7 @@
 package com.ayfri.yologen.mixin;
 
 import com.ayfri.yologen.AutoCapture;
+import com.ayfri.yologen.DebugBBCapture;
 import net.minecraft.client.renderer.LevelRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -17,7 +18,7 @@ public class LevelRendererOutlineMixin {
      */
     @Inject(method = "shouldShowEntityOutlines", at = @At("HEAD"), cancellable = true)
     private void yologen_forceEntityOutlines(CallbackInfoReturnable<Boolean> cir) {
-        if (AutoCapture.isRunning()) {
+        if (AutoCapture.isRunning() || DebugBBCapture.isRunning()) {
             cir.setReturnValue(true);
         }
     }
@@ -29,7 +30,7 @@ public class LevelRendererOutlineMixin {
      */
     @Inject(method = "doEntityOutline", at = @At("HEAD"), cancellable = true)
     private void yologen_suppressOutlineComposite(CallbackInfo ci) {
-        if (AutoCapture.isRunning()) {
+        if (AutoCapture.isRunning() || DebugBBCapture.isRunning()) {
             ci.cancel();
         }
     }
