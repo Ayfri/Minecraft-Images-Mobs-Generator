@@ -373,7 +373,6 @@ internal fun AutoCapture.spawnMobOnLoadedSurface(mc: Minecraft): Boolean {
 	}
 	pendingMobSurfaceSnap = mobX to mobZ
 	mobSpawned = true
-	subTick = 0
 	return true
 }
 

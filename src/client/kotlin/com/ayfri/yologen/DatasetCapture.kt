@@ -206,7 +206,7 @@ data object DatasetCapture {
 		val scaledImage = if (img.width > targetW || img.height > targetH)
 			img.scaleDown(targetW, targetH) else img
 		val croppedImage = scaledImage.cropCenter(cropX, cropY, cropW, cropH)
-		var croppedBoxes: List<YoloBox> = emptyList()
+		var croppedBoxes: List<YoloBox>
 		try {
 			croppedBoxes = boxes.mapNotNull { it.applyCrop(targetW, targetH, cropX, cropY, cropW, cropH) }
 			// Allow empty boxes for negative frames; skip only non-negative frames with no visible mob.
