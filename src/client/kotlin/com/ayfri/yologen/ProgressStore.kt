@@ -29,8 +29,9 @@ internal object ProgressStore {
 	fun resumeCaptureIndex(mc: Minecraft): Int {
 		val dir = File(mc.gameDirectory, "dataset/images")
 		if (!dir.exists()) return 0
-		return dir.listFiles { f -> f.name.startsWith("frame_") && f.name.endsWith(".png") }
-			?.mapNotNull { it.nameWithoutExtension.removePrefix("frame_").toIntOrNull() }
+		return dir.listFiles { f ->
+			f.name.startsWith("frame_") && (f.name.endsWith(".png") || f.name.endsWith(".jpg"))
+		}?.mapNotNull { it.nameWithoutExtension.removePrefix("frame_").toIntOrNull() }
 			?.maxOrNull()?.plus(1) ?: 0
 	}
 }

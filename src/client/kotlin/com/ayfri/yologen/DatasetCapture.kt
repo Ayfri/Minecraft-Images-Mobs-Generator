@@ -5,13 +5,17 @@ import com.mojang.blaze3d.platform.NativeImage
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
 import net.minecraft.client.Minecraft
 import net.minecraft.client.Screenshot
+import java.awt.image.BufferedImage
 import java.io.File
 import java.io.FileWriter
 import java.util.*
 import java.util.concurrent.Executors
+import javax.imageio.IIOImage
+import javax.imageio.ImageIO
+import javax.imageio.ImageWriteParam
 import kotlin.math.sqrt
 
-private const val FRAMES_CSV_HEADER = "frame,mob,weather,time_ticks,shot,mob_idx,mob_x,mob_y,mob_z"
+private const val FRAMES_CSV_HEADER = "frame,mob,weather,time_ticks,shot,mob_idx,mob_x,mob_y,mob_z,negative"
 private const val BOXES_CSV_HEADER = "frame,class_id,cx,cy,w,h,dist_blocks"
 
 data class CaptureMetadata(
@@ -23,11 +27,12 @@ data class CaptureMetadata(
 	val timeOfDay: Long,
 	val shotIndex: Int,
 	val mobIndex: Int,
+	val negative: Boolean = false,
 ) {
 	private fun Double.fmt() = String.format(Locale.ROOT, "%.2f", this)
 
 	fun toCsvRow(frameName: String) =
-		"$frameName,$mobName,$weather,$timeOfDay,$shotIndex,$mobIndex,${mobX.fmt()},${mobY.fmt()},${mobZ.fmt()}"
+		"$frameName,$mobName,$weather,$timeOfDay,$shotIndex,$mobIndex,${mobX.fmt()},${mobY.fmt()},${mobZ.fmt()},${if (negative) 1 else 0}"
 }
 
 data object DatasetCapture {
@@ -35,6 +40,7 @@ data object DatasetCapture {
 
 	var autoMode = true
 	var debugBBMode = false
+	var debugClassId: Int? = null
 
 	@Volatile
 	var pendingCapture = false
@@ -100,6 +106,29 @@ data object DatasetCapture {
 					boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
 					if (boxes.isEmpty()) return@register
 				}
+			} else if (debugBBMode) {
+				val classId = debugClassId
+				if (classId != null && metadata != null) {
+					val player = mc.player ?: return@register
+					val dx = metadata.mobX - player.x
+					val dy = (metadata.mobY + 1.0) - player.eyeY
+					val dz = metadata.mobZ - player.z
+					val dist = sqrt(dx * dx + dy * dy + dz * dz).toFloat()
+					val sBox = readSilhouetteBox(mc, classId, dist)
+					if (sBox != null) {
+						boxes = listOf(sBox)
+					} else {
+						val levelState = context.levelState()
+						val camera = levelState.cameraRenderState
+						boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
+						if (boxes.isEmpty()) return@register
+					}
+				} else {
+					val levelState = context.levelState()
+					val camera = levelState.cameraRenderState
+					boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
+					if (boxes.isEmpty()) return@register
+				}
 			} else {
 				// Auto-mode or manual capture: AABB for all visible entities
 				val levelState = context.levelState()
@@ -118,6 +147,8 @@ data object DatasetCapture {
 			val cropY = cfg.cropY
 			val cropW = cfg.cropWidth
 			val cropH = cfg.cropHeight
+			val imageFormat = cfg.imageFormat
+			val jpegQuality = cfg.jpegQuality
 
 			// In Fabulous graphics mode, translucent terrain is rendered to a separate
 			// framebuffer that hasn't been composited yet. Composite on the IO thread.
@@ -135,7 +166,8 @@ data object DatasetCapture {
 								}
 								writeCapture(
 									main, boxes, metadata, name, gameDir,
-									targetW, targetH, cropX, cropY, cropW, cropH
+									targetW, targetH, cropX, cropY, cropW, cropH,
+									imageFormat, jpegQuality
 								)
 							}
 						}
@@ -145,7 +177,8 @@ data object DatasetCapture {
 						mainImg.use { img ->
 							writeCapture(
 								img, boxes, metadata, name, gameDir,
-								targetW, targetH, cropX, cropY, cropW, cropH
+								targetW, targetH, cropX, cropY, cropW, cropH,
+								imageFormat, jpegQuality
 							)
 						}
 					}
@@ -166,14 +199,18 @@ data object DatasetCapture {
 		cropY: Int,
 		cropW: Int,
 		cropH: Int,
+		imageFormat: String = "jpg",
+		jpegQuality: Float = 0.90f,
 	) {
+		val isNegative = metadata?.negative == true
 		val scaledImage = if (img.width > targetW || img.height > targetH)
 			img.scaleDown(targetW, targetH) else img
 		val croppedImage = scaledImage.cropCenter(cropX, cropY, cropW, cropH)
 		var croppedBoxes: List<YoloBox> = emptyList()
 		try {
 			croppedBoxes = boxes.mapNotNull { it.applyCrop(targetW, targetH, cropX, cropY, cropW, cropH) }
-			if (croppedBoxes.isEmpty()) return
+			// Allow empty boxes for negative frames; skip only non-negative frames with no visible mob.
+			if (croppedBoxes.isEmpty() && !isNegative) return
 
 			if (debugBBMode) {
 				croppedImage.drawBoundingBoxes(croppedBoxes)
@@ -183,8 +220,14 @@ data object DatasetCapture {
 				return
 			}
 
+			val ext = if (imageFormat.lowercase() == "jpg" || imageFormat.lowercase() == "jpeg") "jpg" else "png"
 			val imagesDir = File(gameDir, "dataset/images").also { it.mkdirs() }
-			croppedImage.writeToFile(File(imagesDir, "$name.png"))
+			val outFile = File(imagesDir, "$name.$ext")
+			if (ext == "jpg") {
+				croppedImage.writeJpeg(outFile, jpegQuality)
+			} else {
+				croppedImage.writeToFile(outFile)
+			}
 		} finally {
 			if (scaledImage !== img) scaledImage.close()
 			croppedImage.close()
@@ -199,12 +242,41 @@ data object DatasetCapture {
 				if (metadata != null) w.appendLine(metadata.toCsvRow(name))
 			}
 
-			val boxesFile = File(datasetDir, "boxes.csv")
-			val needsBoxesHeader = !boxesFile.exists()
-			FileWriter(boxesFile, true).use { w ->
-				if (needsBoxesHeader) w.appendLine(BOXES_CSV_HEADER)
-				for (box in croppedBoxes) w.appendLine(box.toCsvRow(name))
+			if (!isNegative) {
+				val boxesFile = File(datasetDir, "boxes.csv")
+				val needsBoxesHeader = !boxesFile.exists()
+				FileWriter(boxesFile, true).use { w ->
+					if (needsBoxesHeader) w.appendLine(BOXES_CSV_HEADER)
+					for (box in croppedBoxes) w.appendLine(box.toCsvRow(name))
+				}
 			}
+		}
+	}
+
+	private fun NativeImage.writeJpeg(file: File, quality: Float) {
+		val w = width; val h = height
+		val bi = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)
+		val pixels = pixelsABGR
+		// NativeImage ABGR int: bits 0-7=R, 8-15=G, 16-23=B, 24-31=A
+		for (y in 0 until h) {
+			val row = y * w
+			for (x in 0 until w) {
+				val abgr = pixels[row + x]
+				val r = abgr and 0xFF
+				val g = (abgr ushr 8) and 0xFF
+				val b = (abgr ushr 16) and 0xFF
+				bi.setRGB(x, y, (r shl 16) or (g shl 8) or b)
+			}
+		}
+		val writer = ImageIO.getImageWritersByFormatName("jpeg").next()
+		val param = writer.defaultWriteParam.also {
+			it.compressionMode = ImageWriteParam.MODE_EXPLICIT
+			it.compressionQuality = quality
+		}
+		ImageIO.createImageOutputStream(file).use { out ->
+			writer.output = out
+			writer.write(null, IIOImage(bi, null, null), param)
+			writer.dispose()
 		}
 	}
 
