@@ -5,7 +5,8 @@
   "compatibilityLevel": "JAVA_21",
   "client": [
     "LevelRendererAccessor",
-    "LevelRendererOutlineMixin"
+    "LevelRendererOutlineMixin",
+    "MinecraftTickRateMixin"
   ],
   "injectors": {
     "defaultRequire": 1
