@@ -78,6 +78,7 @@ fun registerHud() {
 		val totalShots = MOB_TYPES.size * shotsPerMob
 		val doneShots = AutoCapture.completedCount * shotsPerMob + AutoCapture.shotCount
 		val elapsedMs = System.currentTimeMillis() - AutoCapture.startTimeMs
+		val shotsPerSec = if (elapsedMs > 1000) "%.1f sps".format(AutoCapture.totalShots * 1000.0 / elapsedMs) else "…"
 		val etaText = if (doneShots > 0 && elapsedMs > 0) {
 			val msLeft = elapsedMs * (totalShots - doneShots) / doneShots
 			val secsLeft = (msLeft / 1000).toInt()
@@ -97,7 +98,7 @@ fun registerHud() {
 		g.fill(x + 62, y + 1, x + 66, y + lh - 1, phaseColor)
 		g.text(font, phaseLabel, x + 70, y, phaseColor)
 		if (isCapturing) {
-			g.textRight(font, "ETA $etaText", x + panelW - 10, y, PANEL_BORDER)
+			g.textRight(font, "$shotsPerSec  ETA $etaText", x + panelW - 10, y, PANEL_BORDER)
 		}
 		y += lh + 5
 
