@@ -58,7 +58,8 @@ internal fun AutoCapture.tickSetup(mc: Minecraft) {
 
 	pendingMobSurfaceSnap?.let { (x, z) -> snapMobToLoadedSurface(mc, x, z) }
 
-	if (++setupTick >= SETUP_WAIT_TICKS && mobSpawned && pendingMobSurfaceSnap == null && poolBuildDone) {
+	// Transition as soon as all conditions are met (event-driven after MOB_SPAWN_TICK).
+	if (++setupTick >= MOB_SPAWN_TICK && mobSpawned && pendingMobSurfaceSnap == null && poolBuildDone) {
 		setupTick = 0; phase = AutoCapture.Phase.CAPTURING
 	}
 }
@@ -67,6 +68,12 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 	val player = mc.player ?: return
 	val cfg = ConfigHolder.config
 	clearMobFire(mc)
+
+	// Keep the camera aligned while waiting for the previous frame to be consumed.
+	applyRotation(mc)
+
+	// Gate: wait until the render thread has consumed the previous pendingCapture.
+	if (DatasetCapture.pendingCapture) return
 
 	pendingMobSurfaceSnap?.let { (x, z) ->
 		if (!snapMobToLoadedSurface(mc, x, z)) return
@@ -78,131 +85,166 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 		if (--terrainWaitTick > 0) return
 	}
 
-	if (subTick > 0) applyRotation(mc)
-
-	when (subTick) {
-		0 -> {
-			updateMobPosition(mc)
-
-			if (shotCount > 0 && shotCount % cfg.relocateEvery == 0 && lastRelocatedAtShot != shotCount) {
-				lastRelocatedAtShot = shotCount
-				val relocation = nextRelocation ?: chooseRelocation()
-				pendingMobSurfaceSnap = relocation
-				preloadPosition(mc, relocation.first, relocation.second)
-				terrainWaitTick = RELOCATE_WAIT_TICKS
-				nextRelocation = null
-				return
-			}
-
-			currentWeather = weatherForShot(shotCount)
-			currentTime = if (cfg.cameraJitterAndLighting) {
-				(baseTime + shotCount * cfg.timePerShot + Random.nextLong(-2000, 2000)).rem(24000)
-					.let { if (it < 0) it + 24000 else it }
-			} else {
-				(baseTime + shotCount * cfg.timePerShot) % 24000L
-			}
-			applyInstantTime(mc, currentTime)
-			applyInstantWeather(mc, currentWeather)
-
-			if ((shotCount + 1) % cfg.relocateEvery == 0 && nextRelocation == null) {
-				nextRelocation = chooseRelocation()
-				forceServerChunksAround(mc, nextRelocation!!.first.toInt(), nextRelocation!!.second.toInt())
-			}
-
-			val (angle, dist, heightOffset) = orbitParams(shotCount)
-			val jitterYaw =
-				if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees * 2 - cfg.cameraJitterDegrees else 0f
-			val jitterPitch =
-				if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees - cfg.cameraJitterDegrees / 2 else 0f
-			val lookOffsetYaw = if (cfg.lookOffsetDegrees > 0f)
-				Random.nextFloat() * cfg.lookOffsetDegrees * 2 - cfg.lookOffsetDegrees else 0f
-			val lookOffsetPitch = if (cfg.lookOffsetDegrees > 0f)
-				Random.nextFloat() * cfg.lookOffsetDegrees - cfg.lookOffsetDegrees / 2 else 0f
-
-			val px = mobX + cos(angle) * dist
-			val pz = mobZ + sin(angle) * dist
-			val py = if (currentMobIsAquatic) {
-				// Orbit directly around mobY so the camera can be underwater
-				(mobY + heightOffset).coerceAtLeast(mobY - 6.0)
-			} else {
-				maxOf(safeSurfaceY(mc, px.toInt(), pz.toInt()), mobY) + heightOffset
-			}
-
-			val dx = mobX - px
-			val dy = (mobY + 1.0) - py
-			val dz = mobZ - pz
-			val h = sqrt(dx * dx + dz * dz)
-			targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat() + jitterYaw + lookOffsetYaw
-			targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat() + jitterPitch + lookOffsetPitch
-
-			player.snapTo(px, py, pz, targetYaw, targetPitch)
-			val server = mc.singleplayerServer
-			if (server != null) server.execute { serverPlayer(mc)?.teleportTo(px, py, pz) }
-			else player.connection.sendCommand("tp @s ${px.fmt()} ${py.fmt()} ${pz.fmt()}")
-
-			applyRotation(mc)
-			subTick = 1
+	if (pendingNegativeShot) {
+		pendingNegativeShot = false
+		// Orbit to the opposite side and face away so the mob is behind the camera.
+		val (angle, dist, heightOffset) = orbitParams(shotCount - 1)
+		val oppositeAngle = angle + Math.PI
+		val px = mobX + cos(oppositeAngle) * dist
+		val pz = mobZ + sin(oppositeAngle) * dist
+		val py = if (currentMobIsAquatic) {
+			(mobY + heightOffset).coerceAtLeast(mobY - 6.0)
+		} else {
+			maxOf(safeSurfaceY(mc, px.toInt(), pz.toInt()), mobY) + heightOffset
 		}
+		// Face directly away from mob (toward-mob yaw + 180°).
+		val dx = mobX - px; val dz = mobZ - pz; val h = sqrt(dx * dx + dz * dz)
+		val awayYaw = (Math.toDegrees(atan2(-dx, dz)) + 180.0).toFloat()
+		val awayPitch = if (h > 0.1) (Math.toDegrees(atan2((mobY + 1.0) - py, h))).toFloat() else 0f
 
-		1 -> {
-			recomputeAndApplyRotation(mc)
+		targetYaw = awayYaw; targetPitch = awayPitch
+		player.snapTo(px, py, pz, targetYaw, targetPitch)
+		val server = mc.singleplayerServer
+		if (server != null) server.execute { serverPlayer(mc)?.teleportTo(px, py, pz) }
+		else player.connection.sendCommand("tp @s ${px.fmt()} ${py.fmt()} ${pz.fmt()}")
+		applyRotation(mc)
 
-			val visOk = isVisible(mc)
-			if (visOk || completedWithoutImage >= 4) {
-				if (!visOk) completedWithoutImage = 0
-				DatasetCapture.pendingCaptureMetadata = CaptureMetadata(
-					mobName = currentMobName, mobX = mobX, mobY = mobY, mobZ = mobZ,
-					weather = currentWeather, timeOfDay = currentTime,
-					shotIndex = shotCount, mobIndex = mobIndex,
-				)
-				DatasetCapture.pendingCapture = true
-				totalShots++
-				completedWithoutImage = 0
+		// Only save the negative frame if the mob is genuinely not visible.
+		if (!isVisible(mc)) {
+			DatasetCapture.pendingCaptureMetadata = CaptureMetadata(
+				mobName = currentMobName, mobX = mobX, mobY = mobY, mobZ = mobZ,
+				weather = currentWeather, timeOfDay = currentTime,
+				shotIndex = shotCount, mobIndex = mobIndex,
+				negative = true,
+			)
+			DatasetCapture.pendingCapture = true
+			totalShots++
+		}
+		return
+	}
+
+	updateMobPosition(mc)
+
+	if (shotCount > 0 && shotCount % cfg.relocateEvery == 0 && lastRelocatedAtShot != shotCount) {
+		lastRelocatedAtShot = shotCount
+		val relocation = nextRelocation ?: chooseRelocation()
+		pendingMobSurfaceSnap = relocation
+		preloadPosition(mc, relocation.first, relocation.second)
+		terrainWaitTick = RELOCATE_WAIT_TICKS
+		nextRelocation = null
+		return
+	}
+
+	currentWeather = weatherForShot(shotCount)
+	currentTime = if (cfg.cameraJitterAndLighting) {
+		(baseTime + shotCount * cfg.timePerShot + Random.nextLong(-2000, 2000)).rem(24000)
+			.let { if (it < 0) it + 24000 else it }
+	} else {
+		(baseTime + shotCount * cfg.timePerShot) % 24000L
+	}
+	applyInstantTime(mc, currentTime)
+	applyInstantWeather(mc, currentWeather)
+
+	if ((shotCount + 1) % cfg.relocateEvery == 0 && nextRelocation == null) {
+		nextRelocation = chooseRelocation()
+		forceServerChunksAround(mc, nextRelocation!!.first.toInt(), nextRelocation!!.second.toInt())
+	}
+
+	val (angle, dist, heightOffset) = orbitParams(shotCount)
+	val jitterYaw =
+		if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees * 2 - cfg.cameraJitterDegrees else 0f
+	val jitterPitch =
+		if (cfg.cameraJitterAndLighting) Random.nextFloat() * cfg.cameraJitterDegrees - cfg.cameraJitterDegrees / 2 else 0f
+	val lookOffsetYaw = if (cfg.lookOffsetDegrees > 0f)
+		Random.nextFloat() * cfg.lookOffsetDegrees * 2 - cfg.lookOffsetDegrees else 0f
+	val lookOffsetPitch = if (cfg.lookOffsetDegrees > 0f)
+		Random.nextFloat() * cfg.lookOffsetDegrees - cfg.lookOffsetDegrees / 2 else 0f
+
+	val px = mobX + cos(angle) * dist
+	val pz = mobZ + sin(angle) * dist
+	val py = if (currentMobIsAquatic) {
+		(mobY + heightOffset).coerceAtLeast(mobY - 6.0)
+	} else {
+		maxOf(safeSurfaceY(mc, px.toInt(), pz.toInt()), mobY) + heightOffset
+	}
+
+	val dx = mobX - px
+	val dy = (mobY + 1.0) - py
+	val dz = mobZ - pz
+	val h = sqrt(dx * dx + dz * dz)
+	targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat() + jitterYaw + lookOffsetYaw
+	targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat() + jitterPitch + lookOffsetPitch
+
+	player.snapTo(px, py, pz, targetYaw, targetPitch)
+	val server = mc.singleplayerServer
+	if (server != null) server.execute { serverPlayer(mc)?.teleportTo(px, py, pz) }
+	else player.connection.sendCommand("tp @s ${px.fmt()} ${py.fmt()} ${pz.fmt()}")
+
+	// Re-compute exact look angles toward mob after teleport.
+	recomputeAndApplyRotation(mc)
+
+	val visOk = isVisible(mc)
+	if (visOk || completedWithoutImage >= 4) {
+		if (!visOk) completedWithoutImage = 0
+		DatasetCapture.pendingCaptureMetadata = CaptureMetadata(
+			mobName = currentMobName, mobX = mobX, mobY = mobY, mobZ = mobZ,
+			weather = currentWeather, timeOfDay = currentTime,
+			shotIndex = shotCount, mobIndex = mobIndex,
+		)
+		DatasetCapture.pendingCapture = true
+		totalShots++
+		completedWithoutImage = 0
+
+		// Schedule a negative shot every 1/negativeFraction regular shots.
+		val negInterval = if (cfg.negativeFraction > 0f) (1f / cfg.negativeFraction).toInt().coerceAtLeast(1) else 0
+		if (negInterval > 0 && (shotCount + 1) % negInterval == 0) {
+			pendingNegativeShot = true
+		}
+	} else {
+		completedWithoutImage++
+		return
+	}
+
+	advanceShotCount(mc)
+}
+
+/** Increments shotCount and handles dimension-phase and mob transitions. */
+private fun AutoCapture.advanceShotCount(mc: Minecraft) {
+	val newCount = ++shotCount
+	val entry = MOB_ENTRIES[mobIndex]
+	val phaseLimit = shotLimitForPhase(dimensionPhaseIndex, entry.dimensions.size)
+
+	// Pre-generate chunks for the next mob's base position while still capturing.
+	val preloadAhead = 50
+	if (newCount == phaseLimit - preloadAhead && dimensionPhaseIndex == entry.dimensions.size - 1) {
+		val nextIdx = findNextMob(completedMobs + currentMobName)
+		if (nextIdx != -1) {
+			val nextEntry = MOB_ENTRIES[nextIdx]
+			val nextDimKey = nextEntry.dimensions[0].levelKey
+			val range = if (nextEntry.dimensions[0] == MobDimension.END) -150..150 else -500..500
+			nextSetupBaseX = Random.nextInt(range.first, range.last + 1)
+			nextSetupBaseZ = Random.nextInt(range.first, range.last + 1)
+			preloadNextSetupPosition(mc, nextDimKey)
+		}
+	}
+
+	if (newCount >= phaseLimit) {
+		if (dimensionPhaseIndex < entry.dimensions.size - 1) {
+			dimensionPhaseIndex++
+			phase = AutoCapture.Phase.SETUP; setupTick = 0
+		} else {
+			ProgressStore.markCompleted(mc, currentMobName)
+			completedMobs = completedMobs + currentMobName
+			completedCount = completedMobs.size
+			val nextIdx = findNextMob(completedMobs)
+			if (nextIdx == -1) {
+				mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAll ${MOB_ENTRIES.size} mobs completed! $totalShots total shots."))
+				stop(mc)
 			} else {
-				completedWithoutImage++
-				subTick = 0
-				return
+				mobIndex = nextIdx
+				resetShotState()
+				phase = AutoCapture.Phase.SETUP; setupTick = 0
 			}
-
-			val newCount = ++shotCount
-			val entry = MOB_ENTRIES[mobIndex]
-			val phaseLimit = shotLimitForPhase(dimensionPhaseIndex, entry.dimensions.size)
-
-			// Pre-generate chunks for the next mob's base position while still capturing,
-			// so terrain is ready before the next setup phase begins.
-			val preloadAhead = 50
-			if (newCount == phaseLimit - preloadAhead && dimensionPhaseIndex == entry.dimensions.size - 1) {
-				val nextIdx = findNextMob(completedMobs + currentMobName)
-				if (nextIdx != -1) {
-					val nextEntry = MOB_ENTRIES[nextIdx]
-					val nextDimKey = nextEntry.dimensions[0].levelKey
-					val range = if (nextEntry.dimensions[0] == MobDimension.END) -150..150 else -500..500
-					nextSetupBaseX = Random.nextInt(range.first, range.last + 1)
-					nextSetupBaseZ = Random.nextInt(range.first, range.last + 1)
-					preloadNextSetupPosition(mc, nextDimKey)
-				}
-			}
-
-			if (newCount >= phaseLimit) {
-				if (dimensionPhaseIndex < entry.dimensions.size - 1) {
-					dimensionPhaseIndex++
-					phase = AutoCapture.Phase.SETUP; setupTick = 0
-				} else {
-					ProgressStore.markCompleted(mc, currentMobName)
-					completedMobs = completedMobs + currentMobName
-					completedCount = completedMobs.size
-					val nextIdx = findNextMob(completedMobs)
-					if (nextIdx == -1) {
-						mc.player?.sendSystemMessage(Component.literal("§a[YoloGen] §fAll ${MOB_ENTRIES.size} mobs completed! $totalShots total shots."))
-						stop(mc)
-					} else {
-						mobIndex = nextIdx
-						resetShotState()
-						phase = AutoCapture.Phase.SETUP; setupTick = 0
-					}
-				}
-			}
-			subTick = 0
 		}
 	}
 }
