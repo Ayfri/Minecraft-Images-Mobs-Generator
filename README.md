@@ -8,27 +8,28 @@ Built as the data generation step for a computer vision course exercise (object 
 
 ## Dataset
 
-The bot iterates through all 87 mob classes in order, captures 200 shots per mob from varying angles, lighting, weather, and biomes, then writes everything to `<game-dir>/dataset/`.
+The bot iterates through all 87 mob classes in order, captures **300 shots per mob** from varying angles, lighting, weather, and biomes, then writes everything to `<game-dir>/dataset/`.
 
 ```
 dataset/
-- images/          512x288 PNG frames
-- frames.csv       frame-level metadata (mob, weather, time, position)
+- images/          512x288 JPEG frames (q90)
+- frames.csv       frame-level metadata (mob, weather, time, position, negative flag)
 - boxes.csv        one row per bounding box, joinable on `frame`
 - progress.txt     completed mobs - allows resuming after a stop or crash
 ```
 
 **`frames.csv`**
 
-| column       | description                          |
-|--------------|--------------------------------------|
-| `frame`      | filename stem, e.g. `frame_000042`   |
-| `mob`        | mob registry name, e.g. `zombie`     |
-| `weather`    | `clear` / `rain` / `thunder`         |
-| `time_ticks` | in-game time of the shot (0-23999)   |
-| `shot`       | shot index within this mob (0-199)   |
-| `mob_idx`    | which mob in the ordered class list  |
-| `mob_x/y/z`  | world position of the mob entity     |
+| column       | description                                              |
+|--------------|----------------------------------------------------------|
+| `frame`      | filename stem, e.g. `frame_000042`                       |
+| `mob`        | mob registry name, e.g. `zombie`                         |
+| `weather`    | `clear` / `rain` / `thunder`                             |
+| `time_ticks` | in-game time of the shot (0-23999)                       |
+| `shot`       | shot index within this mob (0-299)                       |
+| `mob_idx`    | which mob in the ordered class list                      |
+| `mob_x/y/z`  | world position of the mob entity                         |
+| `negative`   | `1` = intentional background frame with no mob visible   |
 
 **`boxes.csv`**
 
@@ -40,27 +41,40 @@ dataset/
 | `w`, `h`      | bounding-box size, normalized to `[0, 1]`    |
 | `dist_blocks` | camera to entity-center distance in blocks   |
 
+Negative frames (background-only) appear in `frames.csv` with `negative=1` but have no rows in `boxes.csv`. They map to empty `.txt` label files in YOLO training format.
+
 ### Dataset properties
 
 - **Ready for YOLO** - bounding boxes are in normalized YOLO format, no preprocessing needed to plug into YOLOv8/v11
-- **Perfect ground truth** - labels are computed from 3D projection math, not hand-annotated, so there is zero annotation error
-- **Scale** - 87 classes x 200 shots = ~17 400 labeled frames generated unattended in ~92 minutes
-- **Controlled diversity** - every mob is captured across 6 weather states, a full 24h lighting cycle, 6 biome temperature buckets (frozen to hot), and 7 orbit tiers covering close/far/top-down viewpoints
-- **Metadata for analysis** - `frames.csv` lets you slice by weather, time, or distance to study how conditions affect detection quality
+- **Perfect ground truth** - labels are computed from 3D projection math, not hand-annotated: zero annotation error
+- **Scale** - 87 classes × 300 shots + ~5% negative frames ≈ **27 400 labeled frames** generated unattended in **~5-10 minutes**
+- **Controlled diversity** - every mob is captured across 3 weather states, a full 24h lighting cycle, 6 biome temperature buckets (frozen to hot), and 7 orbit tiers covering close/far/top-down viewpoints
+- **Size-aware camera** - orbit distance scales automatically with mob bounding box (Giant/Ender Dragon 5-7× farther than a zombie, endermite/silverfish slightly closer)
+- **Negative frames** - ~5% of frames show only terrain with no mob, reducing false positives
+- **Metadata for analysis** - `frames.csv` lets you slice by weather, time, distance, or negative flag
 
 ---
 
 ## How it works
 
-Each frame, the mod reads the render state and projects every entity's AABB corners through the view x projection matrix to screen space. If the resulting box is at least 5px and the entity is in the class map, it is recorded. Screenshots are scaled to 1280x720 then cropped 30% from each edge to 512x288.
+Each frame, the mod reads the render state and projects every entity's AABB corners through the view × projection matrix to screen space. If the resulting box is at least 5 px and the entity is in the class map, it is recorded. For single-mob captures, a pixel-perfect silhouette is read from the entity-outline framebuffer instead of AABB projection. Screenshots are scaled to 1280×720, then cropped 30% from each edge to 512×288 and saved as JPEG q90.
 
-The auto-capture bot (`/yologen`) handles the full pipeline unattended: it iterates through every mob in order, teleports the player to orbit positions around the mob, varies weather and time per shot, relocates to different biomes every 10 shots, and writes progress after each mob so the session can resume after a crash or manual stop.
+The auto-capture bot (`/yologen`) handles the full pipeline unattended. It iterates through every mob in order, teleports the player to orbit positions around the mob, varies weather and time per shot, relocates to different biomes every 10 shots, and writes progress after each mob so the session can resume after a crash or manual stop.
+
+### Turbo mode
+
+When the bot starts it automatically:
+- Sets server tick rate to **100 TPS** (via `ServerTickRateManager`)
+- Removes the client tick-rate clamp (Mixin on `Minecraft.getTickTargetMillis`) so the client keeps up
+- Disables vsync, sets framerate limit to 260, disables AFK throttle
+
+This yields **~100 shots/s** on typical hardware (limited by FPS), vs ~3-10 shots/s in vanilla. All settings are restored when the bot stops.
 
 ---
 
 ## Requirements
 
-- Java 25
+- Java 25 (`C:\Users\pierr\.jdks\openjdk-25.0.1` - set `JAVA_HOME` before running Gradle)
 - Minecraft 26.1.2
 - Fabric Loader 0.19.3+
 - Fabric API 0.150.0+26.1.2
@@ -71,6 +85,7 @@ The auto-capture bot (`/yologen`) handles the full pipeline unattended: it itera
 ## Build
 
 ```powershell
+$env:JAVA_HOME = "C:\Users\pierr\.jdks\openjdk-25.0.1"
 ./gradlew build
 ```
 
@@ -80,13 +95,38 @@ Output goes to `build/libs/`. Copy the JAR to your Minecraft `mods/` folder alon
 
 ## Commands
 
-| Command      | Effect                                                          |
-|--------------|-----------------------------------------------------------------|
-| `/yologen`   | Start the bot (or stop it if running). Resumes from last saved mob. |
-| `/yolostop`  | Stop the bot explicitly                                         |
-| `/yoloclear` | Stop the bot, delete the entire `dataset/` folder and reset progress |
+| Command          | Effect                                                                     |
+|------------------|----------------------------------------------------------------------------|
+| `/yologen`       | Start the bot (or stop it if running). Resumes from last saved mob.        |
+| `/yolostop`      | Stop the bot explicitly and restore all settings.                          |
+| `/yoloclear`     | Stop the bot, delete the entire `dataset/` folder and reset progress.      |
+| `/yolodebugbb`   | One-shot frontal capture of every mob with bounding boxes drawn, for visual validation. |
+| `/yoloreload`    | Reload `config/yologen.json` without restarting.                           |
 
 All commands require cheats / op.
+
+---
+
+## Configuration
+
+Edit `<game-dir>/config/yologen.json` (auto-created on first run) and `/yoloreload` to apply.
+
+| Key                  | Default  | Description                                              |
+|----------------------|----------|----------------------------------------------------------|
+| `shotsPerMob`        | `300`    | Screenshots per mob class                                |
+| `captureTickRate`    | `100`    | Server TPS while capturing (≥ 20)                        |
+| `imageFormat`        | `"jpg"`  | `"jpg"` or `"png"`                                       |
+| `jpegQuality`        | `0.9`    | JPEG compression quality (0–1)                           |
+| `negativeFraction`   | `0.05`   | Fraction of extra background-only frames                 |
+| `relocateEvery`      | `10`     | Shots before teleporting to a new biome location         |
+| `captureRenderDistance` | `8`   | Chunks rendered while capturing                          |
+| `weatherClearFraction` | `0.6`  | Fraction of shots in clear weather                       |
+| `weatherRainFraction`  | `0.2`  | Fraction of shots in rain (remainder = thunder)          |
+| `babyAndVariants`    | `false`  | Include baby mobs and color variants                     |
+| `equipmentAndPoses`  | `false`  | Equip random armor / held items on mobs                  |
+| `multipleMobsPerFrame` | `false`| Spawn multiple mobs per shot                             |
+| `cameraJitterAndLighting` | `false` | Add per-shot camera jitter and random lighting        |
+| `lookOffsetDegrees`  | `10`     | Max random look offset (mob not always perfectly centred)|
 
 ---
 
