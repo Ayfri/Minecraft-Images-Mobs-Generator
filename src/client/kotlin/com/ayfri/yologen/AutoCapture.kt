@@ -58,7 +58,7 @@ data object AutoCapture {
 	internal const val PRELOAD_HEIGHT = 200.0
 	internal const val NETHER_PRELOAD_HEIGHT = 80.0
 	internal const val RELOCATE_WAIT_TICKS = 20
-	internal const val POST_SNAP_TICKS = 8
+	internal const val POST_SNAP_TICKS = 25
 	internal const val SETUP_WAIT_TICKS = 50
 	internal const val TIER_SIZE = 25
 

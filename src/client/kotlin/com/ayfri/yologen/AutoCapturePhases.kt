@@ -75,14 +75,16 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 	// Gate: wait until the render thread has consumed the previous pendingCapture.
 	if (DatasetCapture.pendingCapture) return
 
+	// Count down the terrain wait FIRST so RELOCATE_WAIT_TICKS is not bypassed by an
+	// immediate snap success (the snap check used to run before this counter).
+	if (terrainWaitTick > 0) {
+		if (--terrainWaitTick > 0) return
+	}
+
 	pendingMobSurfaceSnap?.let { (x, z) ->
 		if (!snapMobToLoadedSurface(mc, x, z)) return
 		terrainWaitTick = POST_SNAP_TICKS
 		return
-	}
-
-	if (terrainWaitTick > 0) {
-		if (--terrainWaitTick > 0) return
 	}
 
 	if (pendingNegativeShot) {
@@ -182,6 +184,12 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 
 	// Re-compute exact look angles toward mob after teleport.
 	recomputeAndApplyRotation(mc)
+
+	// Skip if the chunk at the camera position isn't loaded client-side yet.
+	if (mc.level?.isLoaded(net.minecraft.core.BlockPos(px.toInt(), py.toInt(), pz.toInt())) != true) {
+		completedWithoutImage++
+		return
+	}
 
 	val visOk = isVisible(mc)
 	if (visOk || completedWithoutImage >= 4) {
