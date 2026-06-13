@@ -268,9 +268,16 @@ data object AutoCapture {
 		mc.options.framerateLimit().set(savedFramerateLimit)
 		mc.options.inactivityFpsLimit().set(savedInactivityFpsLimit)
 		val server = mc.singleplayerServer
-		if (server != null && savedTickRate > 0f) {
-			server.execute { server.tickRateManager().setTickRate(savedTickRate) }
+		if (server != null) {
+			server.execute {
+				for (level in server.allLevels) {
+					level.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
+				}
+				if (savedTickRate > 0f) server.tickRateManager().setTickRate(savedTickRate)
+			}
 			savedTickRate = 20f
+		} else {
+			mc.player?.connection?.sendCommand("kill @e[tag=$MOB_TAG]")
 		}
 
 		mc.player?.sendSystemMessage(Component.literal("§c[YoloGen] §fStopped - $mobIndex mobs, $totalShots shots captured"))
