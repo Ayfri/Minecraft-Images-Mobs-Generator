@@ -110,6 +110,7 @@ data object AutoCapture {
 	internal var targetYaw = 0f
 
 	internal var startTimeMs = 0L
+	internal var firstShotMs = 0L
 
 	private var savedFov = -1
 	private var savedRenderDistance = -1
@@ -206,6 +207,7 @@ data object AutoCapture {
 		phase = Phase.SETUP
 		setupTick = 0
 		startTimeMs = System.currentTimeMillis()
+		firstShotMs = 0L
 		totalShots = completedMobs.size * cfg.shotsPerMob
 		safeY = mc.player?.y ?: 64.0
 		DatasetCapture.autoMode = false

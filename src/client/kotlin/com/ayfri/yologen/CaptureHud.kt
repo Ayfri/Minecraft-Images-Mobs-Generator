@@ -78,9 +78,12 @@ fun registerHud() {
 		val totalShots = MOB_TYPES.size * shotsPerMob
 		val doneShots = AutoCapture.completedCount * shotsPerMob + AutoCapture.shotCount
 		val elapsedMs = System.currentTimeMillis() - AutoCapture.startTimeMs
-		val shotsPerSec = if (elapsedMs > 1000) "%.1f sps".format(AutoCapture.totalShots * 1000.0 / elapsedMs) else "…"
-		val etaText = if (doneShots > 0 && elapsedMs > 0) {
-			val msLeft = elapsedMs * (totalShots - doneShots) / doneShots
+		val captureElapsedMs =
+			if (AutoCapture.firstShotMs > 0L) System.currentTimeMillis() - AutoCapture.firstShotMs else 0L
+		val shotsPerSec =
+			if (captureElapsedMs > 1000) "%.1f sps".format(AutoCapture.totalShots * 1000.0 / captureElapsedMs) else "…"
+		val etaText = if (doneShots > 0 && captureElapsedMs > 0) {
+			val msLeft = captureElapsedMs * (totalShots - doneShots) / doneShots
 			val secsLeft = (msLeft / 1000).toInt()
 			"%d:%02d".format(secsLeft / 60, secsLeft % 60)
 		} else "…"

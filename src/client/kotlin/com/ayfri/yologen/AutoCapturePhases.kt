@@ -200,6 +200,7 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 			shotIndex = shotCount, mobIndex = mobIndex,
 		)
 		DatasetCapture.pendingCapture = true
+		if (firstShotMs == 0L) firstShotMs = System.currentTimeMillis()
 		totalShots++
 		completedWithoutImage = 0
 
