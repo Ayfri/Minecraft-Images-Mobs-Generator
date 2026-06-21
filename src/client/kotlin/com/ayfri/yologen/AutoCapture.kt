@@ -63,6 +63,7 @@ data object AutoCapture {
 	internal const val RELOCATE_WAIT_TICKS = 1
 	internal const val POST_SNAP_TICKS = 10
 	internal const val SETUP_WAIT_TICKS = 50
+	internal const val MAX_INVISIBLE_RETRIES = 15
 	internal const val TIER_SIZE = 25
 
 	/** Consecutive failed capture attempts (not visible / no usable box) before the mob is relocated. */
@@ -110,9 +111,11 @@ data object AutoCapture {
 	internal var nextRelocation: Pair<Double, Double>? = null
 	internal var pendingMobSurfaceSnap: Pair<Double, Double>? = null
 	internal var relocationCursor = 0
+
 	@Volatile
 	internal var relocationPool = emptyList<BiomeRelocation>()
 	internal val cachedPools = mutableMapOf<MobDimension, List<BiomeRelocation>>()
+
 	@Volatile
 	internal var poolBuildDone = false
 	internal var poolBuildInitialized = false
@@ -288,7 +291,7 @@ data object AutoCapture {
 		if (server != null) {
 			server.execute {
 				for (level in server.allLevels) {
-					level.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.discard() }
+					level.allEntities.filter { MOB_TAG in it.entityTags() }.forEach { it.discard() }
 				}
 				if (savedTickRate > 0f) server.tickRateManager().setTickRate(savedTickRate)
 			}

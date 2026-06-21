@@ -65,6 +65,12 @@ data object DatasetCapture {
 	}
 	private val csvLock = Any()
 
+	/** Mutable carrier so the (fenced) outline callback can hand its box to the (fenced) main callback. */
+	private class SilhouetteHolder {
+		@Volatile
+		var box: YoloBox? = null
+	}
+
 	fun register() {
 		LevelRenderEvents.END_MAIN.register { context ->
 			val awaited = pendingCapture
@@ -89,131 +95,121 @@ data object DatasetCapture {
 				return success
 			}
 
-			val isNegative = metadata?.negative == true
+			// Decide whether this frame uses the pixel-perfect silhouette of a single known mob.
+			// The mob is tagged glowing by AutoCapture; the glow ring is suppressed by
+			// LevelRendererOutlineMixin so only the raw silhouette stays in the outline buffer.
+			// Negative frames (no mob on screen) and multi-mob frames skip it.
+			val silReq: Pair<Int, Float>? = run {
+				if (metadata?.negative == true || cfg.multipleMobsPerFrame || !hasOutlineBuffer(mc)) return@run null
+				val player = mc.player ?: return@run null
+				when {
+					!autoMode && AutoCapture.running -> {
+						val classId = YOLO_CLASS_MAP[AutoCapture.currentMobEntityType] ?: return@run null
+						val dx = AutoCapture.mobX - player.x
+						val dy = (AutoCapture.mobY + 1.0) - player.eyeY
+						val dz = AutoCapture.mobZ - player.z
+						classId to sqrt(dx * dx + dy * dy + dz * dz).toFloat()
+					}
 
-			// Negative frames: the camera faces away from the mob, so the frame is background-only
-			//   by construction → no boxes, written unconditionally.
-			// Primary path (!autoMode = auto-capture running):
-			//   - Known class ID → pixel-perfect silhouette from entity-outline buffer.
-			//     The mob is tagged glowing by AutoCapture.spawnMobEntity; the glow ring
-			//     is suppressed by LevelRendererOutlineMixin so it never reaches the screenshot.
-			//   - No class ID (multi-mob diversity) → AABB projector per entity.
-			//
-			// Fallback path (autoMode = manual/explore mode): AABB projector.
-			val boxes: List<YoloBox>
-			if (isNegative) {
-				boxes = emptyList()
-			} else if (!autoMode && AutoCapture.running) {
-				val classId = YOLO_CLASS_MAP[AutoCapture.currentMobEntityType]
-				if (classId != null && !cfg.multipleMobsPerFrame) {
-					val player = mc.player ?: return@register
-					val dx = AutoCapture.mobX - player.x
-					val dy = (AutoCapture.mobY + 1.0) - player.eyeY
-					val dz = AutoCapture.mobZ - player.z
-					val dist = sqrt(dx * dx + dy * dy + dz * dz).toFloat()
-					val sBox = readSilhouetteBox(mc, classId, dist)
-					if (sBox != null) {
-						boxes = listOf(sBox)
-					} else {
-						// Silhouette buffer unavailable - fall back to AABB projection
-						val levelState = context.levelState()
-						val camera = levelState.cameraRenderState
-						boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-						if (boxes.isEmpty()) { finish(false); return@register }
+					debugBBMode -> {
+						val classId = debugClassId ?: return@run null
+						if (metadata == null) return@run null
+						val dx = metadata.mobX - player.x
+						val dy = (metadata.mobY + 1.0) - player.eyeY
+						val dz = metadata.mobZ - player.z
+						classId to sqrt(dx * dx + dy * dy + dz * dz).toFloat()
 					}
-				} else {
-					// Multi-mob per frame or multi-mob diversity: AABB per entity for individual boxes
-					val levelState = context.levelState()
-					val camera = levelState.cameraRenderState
-					boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-					if (boxes.isEmpty()) { finish(false); return@register }
+
+					else -> null
 				}
-			} else if (debugBBMode) {
-				val classId = debugClassId
-				if (classId != null && metadata != null) {
-					val player = mc.player ?: return@register
-					val dx = metadata.mobX - player.x
-					val dy = (metadata.mobY + 1.0) - player.eyeY
-					val dz = metadata.mobZ - player.z
-					val dist = sqrt(dx * dx + dy * dy + dz * dz).toFloat()
-					val sBox = readSilhouetteBox(mc, classId, dist)
-					if (sBox != null) {
-						boxes = listOf(sBox)
-					} else {
-						val levelState = context.levelState()
-						val camera = levelState.cameraRenderState
-						boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-						if (boxes.isEmpty()) { finish(false); return@register }
-					}
-				} else {
-					val levelState = context.levelState()
-					val camera = levelState.cameraRenderState
-					boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-					if (boxes.isEmpty()) { finish(false); return@register }
+			}
+
+			if (silReq != null) {
+				val (classId, dist) = silReq
+				val target = outlineTarget(mc) ?: run { finish(false); return@register }
+				val holder = SilhouetteHolder()
+				// Issue the outline grab FIRST, in this same frame, so its glReadPixels captures
+				// the current frame. Its fenced callback runs before the main one (FIFO), so the
+				// box is ready by the time we write. A null box means the mob is fully occluded.
+				Screenshot.takeScreenshot(target) { outImg ->
+					outImg.use { holder.box = computeSilhouetteBox(it, classId, dist) }
 				}
-			} else {
-				// Auto-mode or manual capture: AABB for all visible entities
+				if (holder.box == null && metadata?.negative != true) { finish(false); return@register }
+				finish(true)
+				grabMainAndWrite(mc, metadata, cfg) { holder.box?.let { listOf(it) } }
+				return@register
+			}
+
+			// AABB path: per-entity projection (multi-mob, manual mode, or no outline buffer).
+			// Negative frames are saved with no box.
+			val boxes: List<YoloBox> = if (metadata?.negative == true) emptyList() else {
 				val levelState = context.levelState()
 				val camera = levelState.cameraRenderState
-				boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-				if (boxes.isEmpty()) { finish(false); return@register }
+				levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
 			}
-
-			// Synchronous crop-survival check for the awaited auto-capture path: the shot only
-			// counts (and advances) if at least one box survives the centre crop. This keeps the
-			// tick's shot counter in lock-step with images actually written to disk.
-			if (awaited && !isNegative && !debugBBMode) {
-				val survives = boxes.any {
-					it.applyCrop(cfg.targetWidth, cfg.targetHeight, cfg.cropX, cfg.cropY, cfg.cropWidth, cfg.cropHeight) != null
-				}
-				if (!survives) { finish(false); return@register }
-			}
+			if (boxes.isEmpty() && metadata?.negative != true) { finish(false); return@register }
 			finish(true)
+			grabMainAndWrite(mc, metadata, cfg) { boxes }
+		}
+	}
 
-			val idx = captureIndex++
-			val name = "frame_%06d".format(idx)
-			val gameDir = mc.gameDirectory
+	/**
+	 * Grabs the main (+translucent) render target and writes the capture on the IO thread.
+	 * [resolveBoxes] is evaluated inside the fenced main callback (after any silhouette callback
+	 * has run); returning null skips the frame entirely (e.g. mob fully occluded).
+	 */
+	private fun grabMainAndWrite(
+		mc: Minecraft,
+		metadata: CaptureMetadata?,
+		cfg: com.ayfri.yologen.config.YoloConfig,
+		resolveBoxes: () -> List<YoloBox>?,
+	) {
+		val gameDir = mc.gameDirectory
+		val targetW = cfg.targetWidth
+		val targetH = cfg.targetHeight
+		val cropX = cfg.cropX
+		val cropY = cfg.cropY
+		val cropW = cfg.cropWidth
+		val cropH = cfg.cropHeight
+		val imageFormat = cfg.imageFormat
+		val jpegQuality = cfg.jpegQuality
 
-			val targetW = cfg.targetWidth
-			val targetH = cfg.targetHeight
-			val cropX = cfg.cropX
-			val cropY = cfg.cropY
-			val cropW = cfg.cropWidth
-			val cropH = cfg.cropHeight
-			val imageFormat = cfg.imageFormat
-			val jpegQuality = cfg.jpegQuality
+		// In Fabulous graphics mode, translucent terrain is rendered to a separate
+		// framebuffer that hasn't been composited yet. Composite on the IO thread.
+		val translucentTarget = mc.levelRenderer.translucentTarget
 
-			// In Fabulous graphics mode, translucent terrain is rendered to a separate
-			// framebuffer that hasn't been composited yet. Composite on the IO thread.
-			val translucentTarget = mc.levelRenderer.translucentTarget
-
-			Screenshot.takeScreenshot(mc.mainRenderTarget) { mainImg ->
-				if (translucentTarget != null) {
-					Screenshot.takeScreenshot(translucentTarget) { transImg ->
-						ioExecutor.submit {
-							mainImg.use { main ->
-								transImg.use { trans ->
-									if (trans.width == main.width && trans.height == main.height) {
-										compositeOver(main, trans)
-									}
-								}
-								writeCapture(
-									main, boxes, metadata, name, gameDir,
-									targetW, targetH, cropX, cropY, cropW, cropH,
-									imageFormat, jpegQuality
-								)
-							}
-						}
-					}
-				} else {
+		Screenshot.takeScreenshot(mc.mainRenderTarget) { mainImg ->
+			val boxes = resolveBoxes()
+			if (boxes == null) {
+				mainImg.close()
+				return@takeScreenshot
+			}
+			val name = "frame_%06d".format(captureIndex++)
+			if (translucentTarget != null) {
+				Screenshot.takeScreenshot(translucentTarget) { transImg ->
 					ioExecutor.submit {
-						mainImg.use { img ->
+						mainImg.use { main ->
+							transImg.use { trans ->
+								if (trans.width == main.width && trans.height == main.height) {
+									compositeOver(main, trans)
+								}
+							}
 							writeCapture(
-								img, boxes, metadata, name, gameDir,
+								main, boxes, metadata, name, gameDir,
 								targetW, targetH, cropX, cropY, cropW, cropH,
 								imageFormat, jpegQuality
 							)
 						}
+					}
+				}
+			} else {
+				ioExecutor.submit {
+					mainImg.use { img ->
+						writeCapture(
+							img, boxes, metadata, name, gameDir,
+							targetW, targetH, cropX, cropY, cropW, cropH,
+							imageFormat, jpegQuality
+						)
 					}
 				}
 			}

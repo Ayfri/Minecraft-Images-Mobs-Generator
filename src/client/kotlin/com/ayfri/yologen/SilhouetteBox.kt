@@ -1,32 +1,40 @@
 package com.ayfri.yologen
 
+import com.ayfri.yologen.DatasetCapture.applyCrop
 import com.ayfri.yologen.mixin.LevelRendererAccessor
+import com.mojang.blaze3d.pipeline.RenderTarget
+import com.mojang.blaze3d.platform.NativeImage
 import net.minecraft.client.Minecraft
-import net.minecraft.client.Screenshot
 
 /**
- * Reads the entity-outline framebuffer (populated by Minecraft's glow-outline pass) and
- * computes a tight screen-space bounding box from the lit pixels.  This covers the full
- * rendered model - including parts that extend beyond the collision AABB (blaze rods,
- * ghast tentacles, warden appendages, etc.).
+ * The entity-outline framebuffer is populated by Minecraft's glow-outline pass (every mob is
+ * tagged glowing by AutoCapture). Cancelling [com.ayfri.yologen.mixin.LevelRendererOutlineMixin.doEntityOutline]
+ * keeps the glow ring off the screenshot while leaving the raw silhouette in this buffer.
  *
- * The outline target contains the raw silhouette before the glow-ring post-process, so
- * cancelling [LevelRendererOutlineMixin.doEntityOutline] keeps the ring off the screenshot
- * while leaving the buffer intact for us to read here.
- *
- * Returns null if the buffer is unavailable or contains no lit pixels (mob fully occluded).
- *
- * Coordinate space: normalised [0,1] in YOLO format (cx, cy, w, h) relative to the full
- * window (before the crop applied by DatasetCapture).  The applyCrop() call in DatasetCapture
- * handles remapping to the cropped-image space, exactly like the legacy AABB boxes.
+ * IMPORTANT: reading this buffer must happen INSIDE a `Screenshot.takeScreenshot` callback.
+ * In 26.1 `Screenshot.takeScreenshot` issues the GPU→buffer copy immediately but runs the
+ * consumer behind a GPU fence (`RenderSystem.queueFencedTask`), one frame later. Reading the
+ * pixels synchronously right after the call returns nothing - which is why the old
+ * `readSilhouetteBox` always returned null and every box silently fell back to the AABB.
  */
-fun readSilhouetteBox(mc: Minecraft, classId: Int, dist: Float): YoloBox? {
-	val outlineTarget = (mc.levelRenderer as LevelRendererAccessor).entityOutlineTarget
-		?: return null
+fun outlineTarget(mc: Minecraft): RenderTarget? =
+	(mc.levelRenderer as LevelRendererAccessor).entityOutlineTarget
 
-	val screenW = mc.window.width
-	val screenH = mc.window.height
-	if (screenW <= 0 || screenH <= 0) return null
+fun hasOutlineBuffer(mc: Minecraft): Boolean = outlineTarget(mc) != null
+
+/**
+ * Computes a tight screen-space bounding box from the lit pixels of an already-grabbed outline
+ * image. Covers the full rendered model - parts that extend beyond the collision AABB (dragon
+ * wings, ghast tentacles, warden appendages, etc.) included.
+ *
+ * Returns null if the image contains no lit pixels (mob fully occluded) or the box is < 4px.
+ * Coordinates are normalised [0,1] relative to the image; [DatasetCapture.applyCrop] remaps
+ * them into the cropped-image space exactly like the AABB boxes.
+ */
+fun computeSilhouetteBox(img: NativeImage, classId: Int, dist: Float): YoloBox? {
+	val w = img.width
+	val h = img.height
+	if (w <= 0 || h <= 0) return null
 
 	var minX = Int.MAX_VALUE
 	var minY = Int.MAX_VALUE
@@ -34,40 +42,29 @@ fun readSilhouetteBox(mc: Minecraft, classId: Int, dist: Float): YoloBox? {
 	var maxY = Int.MIN_VALUE
 	var found = false
 
-	// takeScreenshot gives us an ABGR NativeImage on the render thread.
-	// We scan synchronously inside the callback (called immediately by the method).
-	Screenshot.takeScreenshot(outlineTarget) { img ->
-		img.use {
-			val pixels = img.pixelsABGR
-			val w = img.width
-			val h = img.height
-			for (y in 0 until h) {
-				val row = y * w
-				for (x in 0 until w) {
-					// Screenshot.takeScreenshot forces alpha=0xFF on every pixel (argb | 0xFF000000),
-					// so alpha is useless as a discriminator. The outline buffer clears to black
-					// (0x00000000 → stored as 0xFF000000 after the force), and entity pixels carry
-					// a non-black team colour. Check the RGB channels instead.
-					val pixel = pixels[row + x]
-					if ((pixel and 0x00FFFFFF) != 0) {
-						if (x < minX) minX = x
-						if (y < minY) minY = y
-						if (x > maxX) maxX = x
-						if (y > maxY) maxY = y
-						found = true
-					}
-				}
+	val pixels = img.pixelsABGR
+	for (y in 0 until h) {
+		val row = y * w
+		for (x in 0 until w) {
+			// Screenshot.takeScreenshot forces alpha=0xFF, so alpha is useless as a discriminator.
+			// The outline buffer clears to black; entity pixels carry a non-black team colour.
+			if ((pixels[row + x] and 0x00FFFFFF) != 0) {
+				if (x < minX) minX = x
+				if (y < minY) minY = y
+				if (x > maxX) maxX = x
+				if (y > maxY) maxY = y
+				found = true
 			}
 		}
 	}
 
 	if (!found) return null
 
-	// Add 1-pixel padding to ensure the box fully covers the silhouette edge
+	// 1-pixel padding to fully cover the silhouette edge.
 	minX = (minX - 1).coerceAtLeast(0)
 	minY = (minY - 1).coerceAtLeast(0)
-	maxX = (maxX + 1).coerceAtMost(screenW - 1)
-	maxY = (maxY + 1).coerceAtMost(screenH - 1)
+	maxX = (maxX + 1).coerceAtMost(w - 1)
+	maxY = (maxY + 1).coerceAtMost(h - 1)
 
 	val bw = (maxX - minX).toFloat()
 	val bh = (maxY - minY).toFloat()
@@ -75,10 +72,10 @@ fun readSilhouetteBox(mc: Minecraft, classId: Int, dist: Float): YoloBox? {
 
 	return YoloBox(
 		classId = classId,
-		x = (minX + bw / 2f) / screenW,
-		y = (minY + bh / 2f) / screenH,
-		w = bw / screenW,
-		h = bh / screenH,
+		x = (minX + bw / 2f) / w,
+		y = (minY + bh / 2f) / h,
+		w = bw / w,
+		h = bh / h,
 		dist = dist,
 	)
 }
