@@ -40,7 +40,7 @@ private val ORBIT_PROFILES = arrayOf(
  */
 private val ORBIT_CYCLE = intArrayOf(0, 1, 2, 0, 1, 3, 0, 2, 4, 5)
 
-internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Double> {
+internal fun AutoCapture.orbitParams(shotIdx: Int, retry: Int = 0): Triple<Double, Double, Double> {
 	if (currentMobIsAquatic) return aquaticOrbitParams(shotIdx)
 	val cfg = ConfigHolder.config
 	val s = mobSizeScale
@@ -49,6 +49,13 @@ internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Doubl
 	val jitter =
 		if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
 	val angle = baseAngle + Random.nextDouble(-jitter, jitter)
+	// After repeated occlusion failures, pull the camera in close and to eye level.
+	// Close eye-level framings are almost never blocked by trees/terrain, so the shot
+	// recovers instead of being skipped without a saved image.
+	if (retry >= 4) {
+		return Triple(angle, Random.nextDouble(2.0, 3.5) * s, Random.nextDouble(0.1, 1.0) * s)
+	}
+
 	val p = ORBIT_PROFILES[ORBIT_CYCLE[(shotIdx / TIER_SIZE) % ORBIT_CYCLE.size]]
 	return Triple(angle, Random.nextDouble(p[0], p[1]) * s, Random.nextDouble(p[2], p[3]) * s)
 }

@@ -124,7 +124,7 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 		val px = mobX + cos(oppositeAngle) * dist
 		val pz = mobZ + sin(oppositeAngle) * dist
 		val py = if (currentMobIsAquatic) {
-			(mobY + heightOffset).coerceAtLeast(mobY - 6.0)
+			(mobY + heightOffset).coerceAtLeast(maxOf(mobY - 6.0, waterFloorY(mc, px.toInt(), pz.toInt()) + 0.4))
 		} else {
 			maxOf(safeSurfaceY(mc, px.toInt(), pz.toInt()), mobY) + heightOffset
 		}
@@ -178,7 +178,7 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 		forceServerChunksAround(mc, nextRelocation!!.first.toInt(), nextRelocation!!.second.toInt())
 	}
 
-	val (angle, dist, heightOffset) = orbitParams(shotCount)
+	val (angle, dist, heightOffset) = orbitParams(shotCount, completedWithoutImage)
 	// Look-direction offsets so the mob is not always perfectly centred (applied AFTER the
 	// exact-aim recompute below, otherwise recomputeAndApplyRotation would discard them).
 	val jitterYaw =
@@ -193,7 +193,7 @@ internal fun AutoCapture.tickCapturing(mc: Minecraft) {
 	val px = mobX + cos(angle) * dist
 	val pz = mobZ + sin(angle) * dist
 	val py = if (currentMobIsAquatic) {
-		(mobY + heightOffset).coerceAtLeast(mobY - 6.0)
+		(mobY + heightOffset).coerceAtLeast(maxOf(mobY - 6.0, waterFloorY(mc, px.toInt(), pz.toInt()) + 0.4))
 	} else {
 		maxOf(safeSurfaceY(mc, px.toInt(), pz.toInt()), mobY) + heightOffset
 	}

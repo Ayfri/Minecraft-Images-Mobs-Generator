@@ -37,6 +37,11 @@ internal data class BiomeRelocation(
 	val tempBucket: Int,
 )
 
+/** Ring of horizontal offsets sampled around a spawn spot to test for an open clearing. */
+private val OPENNESS_OFFSETS = listOf(
+	4 to 0, -4 to 0, 0 to 4, 0 to -4, 3 to 3, -3 to 3, 3 to -3, -3 to -3
+)
+
 private fun tempBucket(temp: Float) = when {
 	temp < 0.0f -> 0
 	temp < 0.3f -> 1
@@ -205,7 +210,7 @@ internal fun AutoCapture.findClearPos(
 	// The Nether is a cramped 3D cave system riddled with lava, so valid footing is rarer than on
 	// the overworld surface - give it many more attempts before falling back to the centre.
 	val isNether = currentDimension == MobDimension.NETHER
-	val attempts = if (isNether) 96 else 30
+	val attempts = if (isNether) 96 else 40
 
 	for (i in 0 until attempts) {
 		val x = centerX + Random.nextInt(-radius, radius + 1)
@@ -221,6 +226,18 @@ internal fun AutoCapture.findClearPos(
 			val blocking = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x.toInt(), z.toInt())
 			val noLeaves = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x.toInt(), z.toInt())
 			if (blocking > noLeaves + 1) continue
+			// Prefer open clearings: most nearby columns should sit near the mob's ground
+			// height. Tall trees or cliffs around the mob occlude the orbiting camera and
+			// cause skipped shots. Relaxed after 25 tries so we never fail to place a mob.
+			if (i < 25) {
+				val openCount = OPENNESS_OFFSETS.count { (ox, oz) ->
+					val sx = x.toInt() + ox
+					val sz = z.toInt() + oz
+					level.isLoaded(BlockPos(sx, 0, sz)) &&
+						level.getHeight(Heightmap.Types.MOTION_BLOCKING, sx, sz) <= noLeaves + 2
+				}
+				if (openCount < 6) continue
+			}
 			y = noLeaves.toDouble()
 			val verticalClear = (0 until neededClear).all { dy ->
 				level.getBlockState(BlockPos(x.toInt(), y.toInt() + dy, z.toInt())).isAir
@@ -347,19 +364,57 @@ internal fun AutoCapture.findWaterPos(
 	radius: Int = 24
 ): Triple<Double, Double, Double>? {
 	val level = mc.level ?: return null
+	val mobHeight = (currentMobEntityType?.height ?: 1.8f)
+	// Water blocks needed so the mob is fully submerged with a little clearance above the floor.
+	val needed = ceil(mobHeight).toInt() + 1
 	repeat(40) {
 		val x = centerX + Random.nextDouble(-radius.toDouble(), radius.toDouble())
 		val z = centerZ + Random.nextDouble(-radius.toDouble(), radius.toDouble())
 		if (!level.isLoaded(BlockPos(x.toInt(), 0, z.toInt()))) return@repeat
 		val surfY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x.toInt(), z.toInt())
+
+		// Topmost water block.
+		var topWater = -1
 		for (y in surfY downTo maxOf(surfY - 30, 20)) {
 			if (level.getFluidState(BlockPos(x.toInt(), y, z.toInt())).`is`(FluidTags.WATER)) {
-				val depth = Random.nextInt(1, 4)
-				return Triple(x, (y - depth).toDouble(), z)
+				topWater = y; break
 			}
 		}
+		if (topWater < 0) return@repeat
+
+		// Scan down to the solid floor (first non-water block).
+		var floor = topWater
+		while (floor > topWater - 30 &&
+			level.getFluidState(BlockPos(x.toInt(), floor, z.toInt())).`is`(FluidTags.WATER)
+		) floor--
+
+		// Reject shallow water that would sink a big mob into the floor.
+		val waterDepth = topWater - floor
+		if (waterDepth < needed) return@repeat
+
+		// Feet just above the floor; allow some vertical variation while keeping the
+		// whole body inside the water column.
+		val minFeet = floor + 1
+		val maxFeet = topWater - ceil(mobHeight).toInt()
+		val feetY = if (maxFeet > minFeet) Random.nextInt(minFeet, maxFeet + 1) else minFeet
+		return Triple(x, feetY.toDouble(), z)
 	}
 	return null
+}
+
+/** Solid floor Y at (x,z): first non-water, non-air block scanning down from the surface. */
+internal fun AutoCapture.waterFloorY(mc: Minecraft, x: Int, z: Int): Double {
+	val level = mc.level ?: return mobY - 6.0
+	if (!level.isLoaded(BlockPos(x, 0, z))) return mobY - 6.0
+	val top = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z)
+	val bottom = maxOf(top - 40, -64)
+	for (y in top downTo bottom) {
+		val pos = BlockPos(x, y, z)
+		if (!level.getFluidState(pos).`is`(FluidTags.WATER) && !level.getBlockState(pos).isAir) {
+			return (y + 1).toDouble()
+		}
+	}
+	return bottom.toDouble()
 }
 
 internal fun AutoCapture.spawnMobEntity(mc: Minecraft, x: Double, y: Double, z: Double) {

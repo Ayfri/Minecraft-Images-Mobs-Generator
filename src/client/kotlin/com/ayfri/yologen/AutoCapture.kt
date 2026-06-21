@@ -64,7 +64,6 @@ data object AutoCapture {
 	internal const val POST_SNAP_TICKS = 10
 	internal const val SETUP_WAIT_TICKS = 50
 	internal const val MAX_INVISIBLE_RETRIES = 15
-	internal const val TIER_SIZE = 25
 
 	/** Consecutive failed capture attempts (not visible / no usable box) before the mob is relocated. */
 	internal const val MAX_CAPTURE_RETRIES = 12

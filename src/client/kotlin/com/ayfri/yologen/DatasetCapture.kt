@@ -283,7 +283,8 @@ data object DatasetCapture {
 	}
 
 	private fun NativeImage.writeJpeg(file: File, quality: Float) {
-		val w = width; val h = height
+		val w = width
+		val h = height
 		val bi = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)
 		val pixels = pixelsABGR
 		// NativeImage ABGR int: bits 0-7=R, 8-15=G, 16-23=B, 24-31=A
@@ -363,7 +364,7 @@ data object DatasetCapture {
 	}
 
 	// Re-normalises a YoloBox from TARGET space to the cropped-image space.
-	private fun YoloBox.applyCrop(
+	fun YoloBox.applyCrop(
 		targetW: Int, targetH: Int,
 		cropX: Int, cropY: Int, cropW: Int, cropH: Int,
 	): YoloBox? {
