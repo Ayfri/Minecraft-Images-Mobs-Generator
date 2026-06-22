@@ -152,18 +152,40 @@ internal fun AutoCapture.loadedSurfaceYServer(sLevel: ServerLevel, x: Int, z: In
 	else sLevel.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z).toDouble()
 }
 
-private fun AutoCapture.netherFloorY(mc: Minecraft, x: Int, z: Int): Double {
-	val level = mc.level ?: return 40.0
-	for (y in 110 downTo 5) {
-		if (!level.getBlockState(BlockPos(x, y, z)).isAir &&
-			level.getBlockState(BlockPos(x, y + 1, z)).isAir
-		) {
-			val clearOk = (1..3).all { dy -> level.getBlockState(BlockPos(x, y + dy, z)).isAir }
-			if (clearOk) return (y + 1).toDouble()
+/**
+ * Finds a standable Nether floor at (x, z): the highest non-lava solid block whose footing has
+ * enough head-room for the current mob. Scans from just under the bedrock ceiling down to the
+ * lava sea, rejecting fluid (lava) floors and ceilings without clearance.
+ *
+ * Returns the Y to stand on, or null if the whole column is lava / solid / too cramped - callers
+ * picking a spawn point should then try another (x, z) rather than dropping the mob into lava.
+ */
+internal fun AutoCapture.netherSpawnFloorY(mc: Minecraft, x: Int, z: Int): Double? {
+	val level = mc.level ?: return null
+	val mobHeight = currentMobEntityType?.height ?: 1.8f
+	val neededClear = (ceil(mobHeight).toInt() + 1).coerceIn(3, 6)
+	var y = 118
+	while (y >= 8) {
+		val floorPos = BlockPos(x, y, z)
+		val floorState = level.getBlockState(floorPos)
+		val solidFloor = !floorState.isAir &&
+			level.getFluidState(floorPos).isEmpty &&
+			!floorState.getCollisionShape(level, floorPos).isEmpty
+		if (solidFloor) {
+			val headroom = (1..neededClear).all { dy ->
+				val p = BlockPos(x, y + dy, z)
+				level.getBlockState(p).isAir && level.getFluidState(p).isEmpty
+			}
+			if (headroom) return (y + 1).toDouble()
 		}
+		y--
 	}
-	return 40.0
+	return null
 }
+
+/** Non-null Nether floor for camera/base positioning: prefers a real open floor, else a safe default. */
+private fun AutoCapture.netherFloorY(mc: Minecraft, x: Int, z: Int): Double =
+	netherSpawnFloorY(mc, x, z) ?: 40.0
 
 /**
  * Finds a clear spawn position with sufficient vertical and horizontal clearance.
@@ -177,29 +199,35 @@ internal fun AutoCapture.findClearPos(
 ): Pair<Double, Double> {
 	val level = mc.level ?: return centerX to centerZ
 	val mobHeight = (currentMobEntityType?.height ?: 1.8f)
+	val neededClear = ceil(mobHeight).toInt() + 1
+	val hw = (currentMobEntityType?.width ?: 0.6f) / 2f + 0.1f
 
-	for (i in 0 until 30) {
+	// The Nether is a cramped 3D cave system riddled with lava, so valid footing is rarer than on
+	// the overworld surface - give it many more attempts before falling back to the centre.
+	val isNether = currentDimension == MobDimension.NETHER
+	val attempts = if (isNether) 96 else 30
+
+	for (i in 0 until attempts) {
 		val x = centerX + Random.nextInt(-radius, radius + 1)
 		val z = centerZ + Random.nextInt(-radius, radius + 1)
 		val bp = BlockPos(x.toInt(), 0, z.toInt())
 		if (!level.isLoaded(bp)) continue
 
-		val y = if (currentDimension == MobDimension.NETHER) {
-			netherFloorY(mc, x.toInt(), z.toInt()).also { if (it < 5.0) continue }
+		val y: Double
+		if (isNether) {
+			// netherSpawnFloorY already guarantees a non-lava floor with mob head-room.
+			y = netherSpawnFloorY(mc, x.toInt(), z.toInt()) ?: continue
 		} else {
 			val blocking = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x.toInt(), z.toInt())
 			val noLeaves = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x.toInt(), z.toInt())
 			if (blocking > noLeaves + 1) continue
-			noLeaves.toDouble()
+			y = noLeaves.toDouble()
+			val verticalClear = (0 until neededClear).all { dy ->
+				level.getBlockState(BlockPos(x.toInt(), y.toInt() + dy, z.toInt())).isAir
+			}
+			if (!verticalClear) continue
 		}
 
-		val neededClear = ceil(mobHeight).toInt() + 1
-		val verticalClear = (0 until neededClear).all { dy ->
-			level.getBlockState(BlockPos(x.toInt(), y.toInt() + dy, z.toInt())).isAir
-		}
-		if (!verticalClear) continue
-
-		val hw = (currentMobEntityType?.width ?: 0.6f) / 2f + 0.1f
 		val horizontalClear = listOf(
 			BlockPos(x.toInt() + hw.roundToInt() + 1, y.toInt() + 1, z.toInt()),
 			BlockPos(x.toInt() - hw.roundToInt() - 1, y.toInt() + 1, z.toInt()),
