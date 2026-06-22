@@ -47,9 +47,9 @@ private fun tempBucket(temp: Float) = when {
 }
 
 /**
- * Builds a diverse relocation pool using [ServerLevel.findClosestBiome3d], which
- * samples the noise biome source without loading chunks - far faster than a grid scan.
- * Results are cached per dimension and reused across mobs.
+ * Prepares the relocation pool build for the current dimension. Cached results are reused
+ * instantly; otherwise the actual biome scan is performed incrementally by [tickBuildPool]
+ * (a few biomes per server tick) so the integrated server never freezes for seconds at a time.
  */
 internal fun AutoCapture.buildPoolForCurrentDimension(mc: Minecraft) {
 	val cached = cachedPools[currentDimension]
@@ -58,24 +58,45 @@ internal fun AutoCapture.buildPoolForCurrentDimension(mc: Minecraft) {
 		poolBuildDone = true
 		return
 	}
+	poolBuildDone = false
+	poolBuildInitialized = false
+	biomeQueue = emptyList()
+	biomeQueuePos = 0
+	poolAccumulator.clear()
+	relocationPool = emptyList()
+}
 
+/**
+ * Processes a small batch of biomes per call on the server thread, accumulating relocation
+ * targets via [ServerLevel.findClosestBiome3d] (samples the noise biome source without loading
+ * chunks). Exposes partial progress through [relocationPool] and flips [poolBuildDone] when done.
+ */
+internal fun AutoCapture.tickBuildPool(mc: Minecraft) {
+	if (poolBuildDone) return
 	val server = mc.singleplayerServer ?: run { poolBuildDone = true; return }
 	val radius = ConfigHolder.config.biomeSearchRadius
-	poolBuildDone = false
 
 	server.execute {
 		val sLevel = server.getLevel(currentDimensionKey) ?: run { poolBuildDone = true; return@execute }
-		val registry = sLevel.registryAccess().lookupOrThrow(Registries.BIOME)
-		val origin = BlockPos(baseX, 64, baseZ)
-		val pool = mutableListOf<BiomeRelocation>()
+		if (!poolBuildInitialized) {
+			val registry = sLevel.registryAccess().lookupOrThrow(Registries.BIOME)
+			biomeQueue = registry.listElements().collect(java.util.stream.Collectors.toList())
+			biomeQueuePos = 0
+			poolAccumulator.clear()
+			poolBuildInitialized = true
+		}
 
-		registry.listElements().forEach { biomeHolder ->
-			val biomeKey = biomeHolder.unwrapKey().orElse(null) ?: return@forEach
+		val origin = BlockPos(baseX, 64, baseZ)
+		var processed = 0
+		while (biomeQueuePos < biomeQueue.size && processed < AutoCapture.POOL_BATCH) {
+			val biomeHolder = biomeQueue[biomeQueuePos++]
+			processed++
+			val biomeKey = biomeHolder.unwrapKey().orElse(null) ?: continue
 			try {
-				val result = sLevel.findClosestBiome3d({ it == biomeHolder }, origin, radius, 32, 32)
+				val result = sLevel.findClosestBiome3d({ it == biomeHolder }, origin, radius, 48, 32)
 				if (result != null) {
 					val pos = result.first
-					pool.add(
+					poolAccumulator.add(
 						BiomeRelocation(
 							biomeKey,
 							pos.x.toDouble(),
@@ -88,10 +109,14 @@ internal fun AutoCapture.buildPoolForCurrentDimension(mc: Minecraft) {
 				// biome not found within radius - skip
 			}
 		}
+		// Expose partial progress so relocations can begin and the HUD shows the count growing.
+		relocationPool = poolAccumulator.toList()
 
-		relocationPool = pool.shuffled()
-		cachedPools[currentDimension] = relocationPool
-		poolBuildDone = true
+		if (biomeQueuePos >= biomeQueue.size) {
+			relocationPool = poolAccumulator.shuffled()
+			cachedPools[currentDimension] = relocationPool
+			poolBuildDone = true
+		}
 	}
 }
 

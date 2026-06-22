@@ -57,10 +57,18 @@ data object AutoCapture {
 	internal const val PRELOAD_CHUNK_RADIUS = 2
 	internal const val PRELOAD_HEIGHT = 200.0
 	internal const val NETHER_PRELOAD_HEIGHT = 80.0
-	internal const val RELOCATE_WAIT_TICKS = 20
-	internal const val POST_SNAP_TICKS = 25
+	// Terrain readiness is event-driven (poll chunk-loaded), so these are just small leads/caps:
+	// RELOCATE_WAIT_TICKS lets the teleport dispatch before snapMobToLoadedSurface starts polling;
+	// POST_SNAP_TICKS is the *maximum* settle after a snap - we exit as soon as the chunk is loaded.
+	internal const val RELOCATE_WAIT_TICKS = 1
+	internal const val POST_SNAP_TICKS = 10
 	internal const val SETUP_WAIT_TICKS = 50
 	internal const val TIER_SIZE = 25
+
+	/** Consecutive failed capture attempts (not visible / no usable box) before the mob is relocated. */
+	internal const val MAX_CAPTURE_RETRIES = 12
+	/** Biomes processed per server tick while building the relocation pool (keeps the server responsive). */
+	internal const val POOL_BATCH = 8
 
 	var running = false
 		private set
@@ -85,6 +93,7 @@ data object AutoCapture {
 	internal var completedMobs = emptySet<String>()
 	internal var baseTime = 0L
 	internal var completedWithoutImage = 0
+	internal var awaitingCaptureResult = false
 	internal var pendingNegativeShot = false
 	internal var currentDimensionKey: ResourceKey<Level> = Level.OVERWORLD
 	internal var baseX = 0
@@ -106,6 +115,10 @@ data object AutoCapture {
 	internal val cachedPools = mutableMapOf<MobDimension, List<BiomeRelocation>>()
 	@Volatile
 	internal var poolBuildDone = false
+	internal var poolBuildInitialized = false
+	internal var biomeQueue: List<net.minecraft.core.Holder.Reference<net.minecraft.world.level.biome.Biome>> = emptyList()
+	internal var biomeQueuePos = 0
+	internal val poolAccumulator = mutableListOf<BiomeRelocation>()
 	internal var targetPitch = 0f
 	internal var targetYaw = 0f
 
@@ -160,6 +173,7 @@ data object AutoCapture {
 		relocationCursor = 0
 		currentMobEntityType = null
 		completedWithoutImage = 0
+		awaitingCaptureResult = false
 		dimensionPhaseIndex = 0
 	}
 
@@ -177,6 +191,7 @@ data object AutoCapture {
 		pendingMobSurfaceSnap = null
 		relocationCursor = 0
 		completedWithoutImage = 0
+		awaitingCaptureResult = false
 		val cached = cachedPools[currentDimension]
 		if (cached != null) {
 			relocationPool = cached

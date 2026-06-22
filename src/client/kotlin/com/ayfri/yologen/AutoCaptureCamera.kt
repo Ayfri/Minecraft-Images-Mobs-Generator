@@ -70,15 +70,15 @@ internal fun AutoCapture.applyRotation(mc: Minecraft) {
 	p.xRot = targetPitch; p.xRotO = targetPitch
 }
 
-internal fun AutoCapture.recomputeAndApplyRotation(mc: Minecraft) {
+internal fun AutoCapture.recomputeAndApplyRotation(mc: Minecraft, yawOffset: Float = 0f, pitchOffset: Float = 0f) {
 	val p = mc.player ?: return
 	val dx = mobX - p.x
 	val dy = (mobY + 1.0) - p.eyeY
 	val dz = mobZ - p.z
 	val h = sqrt(dx * dx + dz * dz)
 	if (h < 0.01 && abs(dy) < 0.01) return
-	targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
-	targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat()
+	targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat() + yawOffset
+	targetPitch = (-Math.toDegrees(atan2(dy, h))).toFloat() + pitchOffset
 	applyRotation(mc)
 }
 
@@ -93,24 +93,32 @@ internal fun AutoCapture.updateMobPosition(mc: Minecraft) {
 }
 
 /**
- * Multi-ray visibility test: casts rays to the mob's head, centre, feet, and sides.
- * Requires at least 2 of the rays to be unobstructed before declaring the mob visible.
+ * Direct visibility raycast: casts rays to the mob's head, centre, feet, and sides.
+ * Requires the direct centre ray to be unobstructed AND at least 2 more of the surrounding
+ * rays to be clear, so partially-buried or wall-occluded mobs are rejected (they would
+ * otherwise be picked up through the glow silhouette, producing frames with no visible mob).
  */
 internal fun AutoCapture.isVisible(mc: Minecraft): Boolean {
 	val player = mc.player ?: return true
 	val level = mc.level ?: return true
 	val eye = player.eyePosition
+	val height = (currentMobEntityType?.height ?: 1.8f)
 	val hw = (currentMobEntityType?.width ?: 0.6f) / 2.0
-	val targets = listOf(
-		Vec3(mobX, mobY + (currentMobEntityType?.height ?: 1.8f) * 0.9, mobZ),
-		Vec3(mobX, mobY + (currentMobEntityType?.height ?: 1.8f) * 0.5, mobZ),
-		Vec3(mobX, mobY + 0.1, mobZ),
-		Vec3(mobX + hw, mobY + (currentMobEntityType?.height ?: 1.8f) * 0.5, mobZ),
-		Vec3(mobX - hw, mobY + (currentMobEntityType?.height ?: 1.8f) * 0.5, mobZ),
-	)
-	val clearCount = targets.count { target ->
+	val center = Vec3(mobX, mobY + height * 0.5, mobZ)
+
+	fun clear(target: Vec3): Boolean {
 		val hit = level.clip(ClipContext(eye, target, ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, player))
-		hit.type != HitResult.Type.BLOCK
+		return hit.type != HitResult.Type.BLOCK
 	}
-	return clearCount >= 2
+
+	// The mob centre must be directly visible.
+	if (!clear(center)) return false
+
+	val others = listOf(
+		Vec3(mobX, mobY + height * 0.9, mobZ),
+		Vec3(mobX, mobY + 0.1, mobZ),
+		Vec3(mobX + hw, mobY + height * 0.5, mobZ),
+		Vec3(mobX - hw, mobY + height * 0.5, mobZ),
+	)
+	return others.count { clear(it) } >= 2
 }

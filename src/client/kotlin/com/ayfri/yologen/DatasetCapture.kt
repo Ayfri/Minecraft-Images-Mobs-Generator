@@ -45,6 +45,11 @@ data object DatasetCapture {
 	@Volatile
 	var pendingCapture = false
 
+	/** Set by the render thread after consuming a fired capture: true if an image was actually
+	 *  written, false if it was dropped (no usable box). Read by AutoCapture to advance/retry. */
+	@Volatile
+	var lastCaptureSucceeded = false
+
 	@Volatile
 	var pendingCaptureMetadata: CaptureMetadata? = null
 
@@ -62,10 +67,10 @@ data object DatasetCapture {
 
 	fun register() {
 		LevelRenderEvents.END_MAIN.register { context ->
+			val awaited = pendingCapture
 			val shouldCapture = pendingCapture || (autoMode && ++frameCount % CAPTURE_EVERY_N_FRAMES == 0)
 			if (!shouldCapture) return@register
 			val metadata = pendingCaptureMetadata.also { pendingCaptureMetadata = null }
-			pendingCapture = false
 
 			val mc = Minecraft.getInstance()
 			val cfg = ConfigHolder.config
@@ -73,6 +78,21 @@ data object DatasetCapture {
 			val screenW = mc.window.width
 			val screenH = mc.window.height
 
+			// Reports the outcome of an awaited capture back to AutoCapture (success = image written).
+			// Ordering matters: set the result BEFORE clearing pendingCapture so the tick thread,
+			// which only proceeds once pendingCapture is false, always reads a settled result.
+			fun finish(success: Boolean): Boolean {
+				if (awaited) {
+					lastCaptureSucceeded = success
+					pendingCapture = false
+				}
+				return success
+			}
+
+			val isNegative = metadata?.negative == true
+
+			// Negative frames: the camera faces away from the mob, so the frame is background-only
+			//   by construction → no boxes, written unconditionally.
 			// Primary path (!autoMode = auto-capture running):
 			//   - Known class ID → pixel-perfect silhouette from entity-outline buffer.
 			//     The mob is tagged glowing by AutoCapture.spawnMobEntity; the glow ring
@@ -81,7 +101,9 @@ data object DatasetCapture {
 			//
 			// Fallback path (autoMode = manual/explore mode): AABB projector.
 			val boxes: List<YoloBox>
-			if (!autoMode && AutoCapture.running) {
+			if (isNegative) {
+				boxes = emptyList()
+			} else if (!autoMode && AutoCapture.running) {
 				val classId = YOLO_CLASS_MAP[AutoCapture.currentMobEntityType]
 				if (classId != null && !cfg.multipleMobsPerFrame) {
 					val player = mc.player ?: return@register
@@ -97,14 +119,14 @@ data object DatasetCapture {
 						val levelState = context.levelState()
 						val camera = levelState.cameraRenderState
 						boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-						if (boxes.isEmpty()) return@register
+						if (boxes.isEmpty()) { finish(false); return@register }
 					}
 				} else {
 					// Multi-mob per frame or multi-mob diversity: AABB per entity for individual boxes
 					val levelState = context.levelState()
 					val camera = levelState.cameraRenderState
 					boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-					if (boxes.isEmpty()) return@register
+					if (boxes.isEmpty()) { finish(false); return@register }
 				}
 			} else if (debugBBMode) {
 				val classId = debugClassId
@@ -121,21 +143,32 @@ data object DatasetCapture {
 						val levelState = context.levelState()
 						val camera = levelState.cameraRenderState
 						boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-						if (boxes.isEmpty()) return@register
+						if (boxes.isEmpty()) { finish(false); return@register }
 					}
 				} else {
 					val levelState = context.levelState()
 					val camera = levelState.cameraRenderState
 					boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-					if (boxes.isEmpty()) return@register
+					if (boxes.isEmpty()) { finish(false); return@register }
 				}
 			} else {
 				// Auto-mode or manual capture: AABB for all visible entities
 				val levelState = context.levelState()
 				val camera = levelState.cameraRenderState
 				boxes = levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
-				if (boxes.isEmpty()) return@register
+				if (boxes.isEmpty()) { finish(false); return@register }
 			}
+
+			// Synchronous crop-survival check for the awaited auto-capture path: the shot only
+			// counts (and advances) if at least one box survives the centre crop. This keeps the
+			// tick's shot counter in lock-step with images actually written to disk.
+			if (awaited && !isNegative && !debugBBMode) {
+				val survives = boxes.any {
+					it.applyCrop(cfg.targetWidth, cfg.targetHeight, cfg.cropX, cfg.cropY, cfg.cropWidth, cfg.cropHeight) != null
+				}
+				if (!survives) { finish(false); return@register }
+			}
+			finish(true)
 
 			val idx = captureIndex++
 			val name = "frame_%06d".format(idx)
