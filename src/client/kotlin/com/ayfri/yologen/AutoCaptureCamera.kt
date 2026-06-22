@@ -18,25 +18,39 @@ internal val AutoCapture.mobSizeScale: Double
 		return (effectiveSize / 1.8).coerceIn(0.4, 7.0)
 	}
 
+/**
+ * Camera profiles as (distMin, distMax, heightMin, heightMax), all multiplied by mobSizeScale.
+ * Ordered roughly close→far, overhead last. Distances are deliberately tight: most frames
+ * should have the mob filling a good chunk of the image (the intended use is internet
+ * images/videos, not surveillance-from-above shots).
+ */
+private val ORBIT_PROFILES = arrayOf(
+	doubleArrayOf(1.8, 3.5, 0.2, 1.2),   // 0 close, eye level
+	doubleArrayOf(2.2, 4.0, 0.0, 1.6),   // 1 close, dynamic height
+	doubleArrayOf(3.5, 5.5, 0.5, 2.0),   // 2 medium
+	doubleArrayOf(4.5, 7.5, 1.5, 3.5),   // 3 medium, slightly high
+	doubleArrayOf(7.0, 12.0, 0.8, 3.0),  // 4 far
+	doubleArrayOf(2.5, 5.0, 6.0, 11.0),  // 5 overhead (rare)
+)
+
+/**
+ * Weighted cycle over [ORBIT_PROFILES], indexed by tier. Close shots (0,1) dominate,
+ * far (4) and overhead (5) appear once per 10 tiers. Repeats cleanly for any shotsPerMob,
+ * so the distribution no longer degrades into all-overhead past shot 150.
+ */
+private val ORBIT_CYCLE = intArrayOf(0, 1, 2, 0, 1, 3, 0, 2, 4, 5)
+
 internal fun AutoCapture.orbitParams(shotIdx: Int): Triple<Double, Double, Double> {
 	if (currentMobIsAquatic) return aquaticOrbitParams(shotIdx)
 	val cfg = ConfigHolder.config
 	val s = mobSizeScale
-	val tier = shotIdx / TIER_SIZE
 	val relocateEvery = cfg.relocateEvery
 	val baseAngle = (shotIdx % relocateEvery).toDouble() / relocateEvery * 2 * PI
 	val jitter =
 		if (cfg.cameraJitterAndLighting) cfg.cameraJitterDegrees.toDouble() * PI / 180.0 else PI / relocateEvery.toDouble()
 	val angle = baseAngle + Random.nextDouble(-jitter, jitter)
-	return when (tier) {
-		0 -> Triple(angle, Random.nextDouble(2.5, 5.5) * s, Random.nextDouble(0.3, 1.5) * s)
-		1 -> Triple(angle, Random.nextDouble(5.0, 9.0) * s, Random.nextDouble(1.0, 3.0) * s)
-		2 -> Triple(angle, Random.nextDouble(9.0, 15.0) * s, Random.nextDouble(1.5, 4.0) * s)
-		3 -> Triple(angle, Random.nextDouble(3.0, 6.0) * s, Random.nextDouble(0.3, 2.0) * s)
-		4 -> Triple(angle, Random.nextDouble(6.0, 11.0) * s, Random.nextDouble(2.5, 6.0) * s)
-		5 -> Triple(angle, Random.nextDouble(10.0, 17.0) * s, Random.nextDouble(0.5, 3.0) * s)
-		else -> Triple(angle, Random.nextDouble(2.0, 5.0) * s, Random.nextDouble(8.0, 14.0) * s)
-	}
+	val p = ORBIT_PROFILES[ORBIT_CYCLE[(shotIdx / TIER_SIZE) % ORBIT_CYCLE.size]]
+	return Triple(angle, Random.nextDouble(p[0], p[1]) * s, Random.nextDouble(p[2], p[3]) * s)
 }
 
 /**
