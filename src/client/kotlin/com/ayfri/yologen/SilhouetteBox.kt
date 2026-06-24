@@ -43,9 +43,9 @@ fun computeSilhouetteBox(img: NativeImage, classId: Int, dist: Float): YoloBox? 
 	var found = false
 
 	val pixels = img.pixelsABGR
-	for (y in 0 until h) {
+	for (y in 0..<h) {
 		val row = y * w
-		for (x in 0 until w) {
+		for (x in 0..<w) {
 			// Screenshot.takeScreenshot forces alpha=0xFF, so alpha is useless as a discriminator.
 			// The outline buffer clears to black; entity pixels carry a non-black team colour.
 			if ((pixels[row + x] and 0x00FFFFFF) != 0) {

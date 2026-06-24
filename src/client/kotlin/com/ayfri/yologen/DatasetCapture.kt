@@ -134,7 +134,9 @@ data object DatasetCapture {
 				Screenshot.takeScreenshot(target) { outImg ->
 					outImg.use { holder.box = computeSilhouetteBox(it, classId, dist) }
 				}
-				if (holder.box == null && metadata?.negative != true) { finish(false); return@register }
+				if (holder.box == null && metadata?.negative != true) {
+					finish(false); return@register
+				}
 				finish(true)
 				grabMainAndWrite(mc, metadata, cfg) { holder.box?.let { listOf(it) } }
 				return@register
@@ -147,7 +149,9 @@ data object DatasetCapture {
 				val camera = levelState.cameraRenderState
 				levelState.entityRenderStates.mapNotNull { it.toYoloBox(camera, screenW, screenH) }
 			}
-			if (boxes.isEmpty() && metadata?.negative != true) { finish(false); return@register }
+			if (boxes.isEmpty() && metadata?.negative != true) {
+				finish(false); return@register
+			}
 			finish(true)
 			grabMainAndWrite(mc, metadata, cfg) { boxes }
 		}
@@ -288,9 +292,9 @@ data object DatasetCapture {
 		val bi = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)
 		val pixels = pixelsABGR
 		// NativeImage ABGR int: bits 0-7=R, 8-15=G, 16-23=B, 24-31=A
-		for (y in 0 until h) {
+		for (y in 0..<h) {
 			val row = y * w
-			for (x in 0 until w) {
+			for (x in 0..<w) {
 				val abgr = pixels[row + x]
 				val r = abgr and 0xFF
 				val g = (abgr ushr 8) and 0xFF
@@ -316,9 +320,9 @@ data object DatasetCapture {
 		val h = dst.height
 		val dstPx = dst.pixelsABGR
 		val srcPx = trans.pixelsABGR
-		for (y in 0 until h) {
+		for (y in 0..<h) {
 			val row = y * w
-			for (x in 0 until w) {
+			for (x in 0..<w) {
 				val s = srcPx[row + x]
 				val alpha = (s ushr 24) and 0xFF
 				if (alpha == 0) continue
@@ -341,9 +345,9 @@ data object DatasetCapture {
 		val src = pixelsABGR
 		val scaleX = width.toFloat() / targetW
 		val scaleY = height.toFloat() / targetH
-		for (y in 0 until targetH) {
+		for (y in 0..<targetH) {
 			val srcRow = (y * scaleY).toInt() * width
-			for (x in 0 until targetW) {
+			for (x in 0..<targetW) {
 				dst.setPixelABGR(x, y, src[srcRow + (x * scaleX).toInt()])
 			}
 		}
@@ -354,9 +358,9 @@ data object DatasetCapture {
 	private fun NativeImage.cropCenter(cropX: Int, cropY: Int, cropW: Int, cropH: Int): NativeImage {
 		val dst = NativeImage(NativeImage.Format.RGBA, cropW, cropH, false)
 		val src = pixelsABGR
-		for (y in 0 until cropH) {
+		for (y in 0..<cropH) {
 			val srcRow = (y + cropY) * width + cropX
-			for (x in 0 until cropW) {
+			for (x in 0..<cropW) {
 				dst.setPixelABGR(x, y, src[srcRow + x])
 			}
 		}

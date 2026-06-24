@@ -1,5 +1,7 @@
 package com.ayfri.yologen
 
+import com.ayfri.yologen.AutoCapture.poolBuildDone
+import com.ayfri.yologen.AutoCapture.relocationPool
 import com.ayfri.yologen.config.ConfigHolder
 import net.minecraft.client.Minecraft
 import net.minecraft.core.BlockPos
@@ -212,7 +214,7 @@ internal fun AutoCapture.findClearPos(
 	val isNether = currentDimension == MobDimension.NETHER
 	val attempts = if (isNether) 96 else 40
 
-	for (i in 0 until attempts) {
+	for (i in 0..<attempts) {
 		val x = centerX + Random.nextInt(-radius, radius + 1)
 		val z = centerZ + Random.nextInt(-radius, radius + 1)
 		val bp = BlockPos(x.toInt(), 0, z.toInt())
@@ -239,7 +241,7 @@ internal fun AutoCapture.findClearPos(
 				if (openCount < 6) continue
 			}
 			y = noLeaves.toDouble()
-			val verticalClear = (0 until neededClear).all { dy ->
+			val verticalClear = (0..<neededClear).all { dy ->
 				level.getBlockState(BlockPos(x.toInt(), y.toInt() + dy, z.toInt())).isAir
 			}
 			if (!verticalClear) continue

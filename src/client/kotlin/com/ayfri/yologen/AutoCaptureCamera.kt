@@ -40,6 +40,9 @@ private val ORBIT_PROFILES = arrayOf(
  */
 private val ORBIT_CYCLE = intArrayOf(0, 1, 2, 0, 1, 3, 0, 2, 4, 5)
 
+/** Shots per tier; 20 × 10-entry ORBIT_CYCLE = one clean pass per 200-shot mob. */
+private const val TIER_SIZE = 20
+
 internal fun AutoCapture.orbitParams(shotIdx: Int, retry: Int = 0): Triple<Double, Double, Double> {
 	if (currentMobIsAquatic) return aquaticOrbitParams(shotIdx)
 	val cfg = ConfigHolder.config
@@ -56,7 +59,7 @@ internal fun AutoCapture.orbitParams(shotIdx: Int, retry: Int = 0): Triple<Doubl
 		return Triple(angle, Random.nextDouble(2.0, 3.5) * s, Random.nextDouble(0.1, 1.0) * s)
 	}
 
-	val p = ORBIT_PROFILES[ORBIT_CYCLE[(shotIdx / TIER_SIZE) % ORBIT_CYCLE.size]]
+	val p = ORBIT_PROFILES[ORBIT_CYCLE[shotIdx / TIER_SIZE % ORBIT_CYCLE.size]]
 	return Triple(angle, Random.nextDouble(p[0], p[1]) * s, Random.nextDouble(p[2], p[3]) * s)
 }
 

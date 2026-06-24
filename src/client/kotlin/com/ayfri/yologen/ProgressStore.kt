@@ -4,7 +4,7 @@ import net.minecraft.client.Minecraft
 import java.io.File
 import java.util.concurrent.Executors
 
-internal object ProgressStore {
+internal data object ProgressStore {
 	private val ioExecutor = Executors.newSingleThreadExecutor { r ->
 		Thread(r, "yologen-progress").also { it.isDaemon = true }
 	}

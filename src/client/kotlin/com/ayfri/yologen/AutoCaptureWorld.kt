@@ -2,10 +2,10 @@ package com.ayfri.yologen
 
 import net.minecraft.client.Minecraft
 import net.minecraft.resources.ResourceKey
+import net.minecraft.server.level.TicketType
 import net.minecraft.world.entity.Relative
 import net.minecraft.world.level.ChunkPos
 import net.minecraft.world.level.Level
-import net.minecraft.server.level.TicketType
 
 internal fun AutoCapture.forceServerChunksAround(mc: Minecraft, x: Int, z: Int, radius: Int = PRELOAD_CHUNK_RADIUS) {
 	val server = mc.singleplayerServer ?: return
@@ -62,6 +62,6 @@ internal fun AutoCapture.clearMobFire(mc: Minecraft) {
 	val server = mc.singleplayerServer ?: return
 	server.execute {
 		val sLevel = server.getLevel(currentDimensionKey) ?: return@execute
-		sLevel.allEntities.filter { it.entityTags().contains(MOB_TAG) }.forEach { it.clearFire() }
+		sLevel.allEntities.filter { MOB_TAG in it.entityTags() }.forEach { it.clearFire() }
 	}
 }
