@@ -134,11 +134,13 @@ data object DatasetCapture {
 				Screenshot.takeScreenshot(target) { outImg ->
 					outImg.use { holder.box = computeSilhouetteBox(it, classId, dist) }
 				}
-				if (holder.box == null && metadata?.negative != true) {
-					finish(false); return@register
+				// Don't check holder.box here — the outline callback hasn't fired yet (async FIFO).
+				// finish() is deferred into resolveBoxes so it runs after the outline callback completes.
+				grabMainAndWrite(mc, metadata, cfg) {
+					val b = holder.box?.let { listOf(it) }
+					finish(b != null || metadata?.negative == true)
+					b
 				}
-				finish(true)
-				grabMainAndWrite(mc, metadata, cfg) { holder.box?.let { listOf(it) } }
 				return@register
 			}
 
