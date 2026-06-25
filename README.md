@@ -13,6 +13,10 @@ in a separate repository.
 The bot iterates through all 87 mob classes in order, captures **300 shots per mob** from varying angles, lighting,
 weather, and biomes, then writes everything to `<game-dir>/dataset/`.
 
+![Sample frames with exact ground-truth boxes from 3D projection](docs/dataset_samples.png)
+
+*Sample frames with their auto-computed bounding boxes - no manual annotation.*
+
 ```
 dataset/
 - images/          512x288 JPEG frames (q90)
@@ -61,6 +65,10 @@ empty `.txt` label files in YOLO training format.
 - **Negative frames** - ~5% of frames show only terrain with no mob, reducing false positives
 - **Metadata for analysis** - `frames.csv` lets you slice by weather, time, distance, or negative flag
 
+![Class distribution across the 87 mobs](docs/class_distribution.png)
+
+*Frames per class: ~299 on average, 2.8x imbalance (min 205, max 573).*
+
 ---
 
 ## How it works
@@ -73,6 +81,10 @@ Screenshots are scaled to 1280×720, then cropped 30% from each edge to 512×288
 The auto-capture bot (`/yologen`) handles the full pipeline unattended. It iterates through every mob in order,
 teleports the player to orbit positions around the mob, varies weather and time per shot, relocates to different biomes
 every 10 shots, and writes progress after each mob so the session can resume after a crash or manual stop.
+
+![Camera orbiting a single mob spawn](docs/camera_orbit.png)
+
+*One spawn, captured from a full camera orbit - the source of the per-shot angle diversity.*
 
 Mobs that naturally live in more than one dimension (e.g. Blaze in overworld + nether, Enderman in all three) split
 their shots evenly across those dimensions: the bot teleports between overworld, nether, and end as needed so each mob
