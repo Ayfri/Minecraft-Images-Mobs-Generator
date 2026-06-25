@@ -4,6 +4,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
 import net.minecraft.client.InactivityFpsLimit
 import net.minecraft.client.Minecraft
 import net.minecraft.commands.arguments.EntityAnchorArgument
+import net.minecraft.core.BlockPos
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.network.chat.Component
 import net.minecraft.server.level.ServerPlayer
@@ -151,6 +152,24 @@ data object DebugBBCapture {
 
                 val entity = entry.entityType.create(sLevel, EntitySpawnReason.COMMAND) ?: return@execute
                 entity.snapTo(mobX, MOB_Y, mobZ, 0f, 0f)
+
+                // Populate natural equipment (bow, crossbow, trident, ...) before disabling AI.
+                if (entity is Mob) {
+                    runCatching {
+                        entity.finalizeSpawn(
+                            sLevel,
+                            sLevel.getCurrentDifficultyAt(BlockPos(mobX.toInt(), MOB_Y.toInt(), mobZ.toInt())),
+                            EntitySpawnReason.EVENT,
+                            null,
+                        )
+                    }
+                    if (entity.isPassenger) {
+                        val vehicle = entity.vehicle
+                        entity.stopRiding()
+                        vehicle?.discard()
+                    }
+                }
+
                 // lookAt geometrically computes the correct yaw/pitch to face the camera,
                 // regardless of MC's yaw=0 convention.
                 entity.lookAt(EntityAnchorArgument.Anchor.EYES, cameraEye)

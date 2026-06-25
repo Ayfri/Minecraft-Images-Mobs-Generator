@@ -287,6 +287,27 @@ internal fun AutoCapture.spawnSingleMob(
 ) {
 	val entity = entityType.create(sLevel, EntitySpawnReason.COMMAND) ?: return
 	entity.snapTo(x, y, z, Random.nextFloat() * 360f, 0f)
+
+	// Populate natural equipment + variants (skeleton bow, pillager crossbow, drowned trident,
+	// piglin gold sword, vindicator/illusioner weapons, ...). EntityType.create alone never does this.
+	// Must run before disabling AI. EVENT reason avoids spider/zombie jockey group spawns.
+	if (entity is Mob) {
+		runCatching {
+			entity.finalizeSpawn(
+				sLevel,
+				sLevel.getCurrentDifficultyAt(BlockPos(x.toInt(), y.toInt(), z.toInt())),
+				EntitySpawnReason.EVENT,
+				null,
+			)
+		}
+		// Strip any jockey vehicle finalizeSpawn may still attach (e.g. baby-zombie chicken jockey).
+		if (entity.isPassenger) {
+			val vehicle = entity.vehicle
+			entity.stopRiding()
+			vehicle?.discard()
+		}
+	}
+
 	entity.isInvulnerable = true
 	entity.clearFire()
 	(entity as? Mob)?.isNoAi = true
