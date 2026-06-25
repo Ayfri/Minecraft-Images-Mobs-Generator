@@ -7,13 +7,24 @@ import net.minecraft.world.entity.Relative
 import net.minecraft.world.level.ChunkPos
 import net.minecraft.world.level.Level
 
+/**
+ * Non-persistent, self-expiring chunk ticket used to preload terrain for captures.
+ * Unlike [TicketType.FORCED], it is NOT serialized to disk (no FLAG_PERSIST) and expires
+ * after the timeout, so it never bloats the save with thousands of persistent chunks.
+ * Flags mirror FORCED minus persist (LOADING | SIMULATION | KEEP_DIMENSION_ACTIVE).
+ */
+internal val PRELOAD_TICKET: TicketType = TicketType(
+	1200L, // ticks before auto-unload (~60s); re-added on every preload/relocation
+	TicketType.FLAG_LOADING or TicketType.FLAG_SIMULATION or TicketType.FLAG_KEEP_DIMENSION_ACTIVE,
+)
+
 internal fun AutoCapture.forceServerChunksAround(mc: Minecraft, x: Int, z: Int, radius: Int = PRELOAD_CHUNK_RADIUS) {
 	val server = mc.singleplayerServer ?: return
 	val pos = ChunkPos(x.toChunkCoord(), z.toChunkCoord())
 	server.execute {
 		val sLevel = server.getLevel(currentDimensionKey) ?: return@execute
 		// Non-blocking: queue async generation on server worker threads.
-		sLevel.chunkSource.addTicketAndLoadWithRadius(TicketType.FORCED, pos, radius)
+		sLevel.chunkSource.addTicketAndLoadWithRadius(PRELOAD_TICKET, pos, radius)
 	}
 }
 
@@ -54,7 +65,7 @@ internal fun AutoCapture.preloadNextSetupPosition(mc: Minecraft, targetDimKey: R
 	val pos = ChunkPos(nx.toChunkCoord(), nz.toChunkCoord())
 	server.execute {
 		val sLevel = server.getLevel(targetDimKey) ?: return@execute
-		sLevel.chunkSource.addTicketAndLoadWithRadius(TicketType.FORCED, pos, PRELOAD_CHUNK_RADIUS)
+		sLevel.chunkSource.addTicketAndLoadWithRadius(PRELOAD_TICKET, pos, PRELOAD_CHUNK_RADIUS)
 	}
 }
 
