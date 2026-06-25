@@ -96,8 +96,12 @@ internal fun AutoCapture.applyRotation(mc: Minecraft) {
 
 internal fun AutoCapture.recomputeAndApplyRotation(mc: Minecraft, yawOffset: Float = 0f, pitchOffset: Float = 0f) {
 	val p = mc.player ?: return
+	// Aim at the mob's bounding-box vertical centre so it stays framed regardless of size.
+	// A fixed +1.0 offset pushed small mobs (Frog, Chicken, Bee) to the bottom of the frame
+	// where the bottom crop clipped them; height*0.5 ≈ 0.9 for a zombie (matches old framing).
+	val aimY = mobY + (currentMobEntityType?.height ?: 1.8f) * 0.5
 	val dx = mobX - p.x
-	val dy = (mobY + 1.0) - p.eyeY
+	val dy = aimY - p.eyeY
 	val dz = mobZ - p.z
 	val h = sqrt(dx * dx + dz * dz)
 	if (h < 0.01 && abs(dy) < 0.01) return
