@@ -145,7 +145,7 @@ Edit `<game-dir>/config/yologen.json` (auto-created on first run) and `/yolorelo
 
 | Key                       | Default | Description                                                    |
 |---------------------------|---------|----------------------------------------------------------------|
-| `babyAndVariants`         | `false` | Include baby mobs and color variants                           |
+| `babies`                  | `false` | Randomly turn ~50% of ageable mobs into babies                 |
 | `biomeSearchRadius`       | `2000`  | Radius (blocks) searched when building the biome pool          |
 | `cameraJitterAndLighting` | `false` | Add per-shot camera jitter and wider time spread               |
 | `cameraJitterDegrees`     | `4`     | Max yaw/pitch jitter when `cameraJitterAndLighting` is on      |
@@ -167,8 +167,14 @@ Edit `<game-dir>/config/yologen.json` (auto-created on first run) and `/yolorelo
 | `targetHeight`            | `720`   | Height images are scaled to before crop                        |
 | `targetWidth`             | `1280`  | Width images are scaled to before crop                         |
 | `timePerShot`             | `400`   | In-game time ticks advanced per shot (day/night cycle)         |
+| `variants`                | `false` | Roll a random color/type/size/biome variant per mob (see [VARIANTS.md](VARIANTS.md)) |
 | `weatherClearFraction`    | `0.6`   | Fraction of shots in clear weather                             |
 | `weatherRainFraction`     | `0.2`   | Fraction of shots in rain (remainder = thunder)                |
+
+When `variants` is **off**, every mob is forced to its canonical default appearance (so a cow is
+never silently a warm/cold biome cow just because of where it spawned). When **on**, each mob rolls
+a random variant. `babies` is independent: it only controls whether ageable mobs spawn as babies.
+The full per-mob breakdown is in [VARIANTS.md](VARIANTS.md).
 
 ---
 

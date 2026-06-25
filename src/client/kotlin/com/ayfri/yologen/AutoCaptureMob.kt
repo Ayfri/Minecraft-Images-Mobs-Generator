@@ -5,29 +5,55 @@ import com.ayfri.yologen.AutoCapture.relocationPool
 import com.ayfri.yologen.config.ConfigHolder
 import net.minecraft.client.Minecraft
 import net.minecraft.core.BlockPos
+import net.minecraft.core.Registry
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.core.registries.Registries
 import net.minecraft.resources.ResourceKey
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.tags.FluidTags
+import net.minecraft.util.RandomSource
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.effect.MobEffectInstance
 import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.entity.*
 import net.minecraft.world.entity.animal.axolotl.Axolotl
+import net.minecraft.world.entity.animal.chicken.Chicken
+import net.minecraft.world.entity.animal.chicken.ChickenVariants
+import net.minecraft.world.entity.animal.cow.Cow
+import net.minecraft.world.entity.animal.cow.CowVariants
 import net.minecraft.world.entity.animal.cow.MushroomCow
 import net.minecraft.world.entity.animal.equine.Horse
+import net.minecraft.world.entity.animal.equine.Llama
+import net.minecraft.world.entity.animal.equine.Markings
+import net.minecraft.world.entity.animal.feline.Cat
+import net.minecraft.world.entity.animal.feline.CatVariants
+import net.minecraft.world.entity.animal.fish.Pufferfish
+import net.minecraft.world.entity.animal.fish.Salmon
 import net.minecraft.world.entity.animal.fish.TropicalFish
 import net.minecraft.world.entity.animal.fox.Fox
+import net.minecraft.world.entity.animal.frog.Frog
+import net.minecraft.world.entity.animal.frog.FrogVariants
+import net.minecraft.world.entity.animal.goat.Goat
+import net.minecraft.world.entity.animal.panda.Panda
 import net.minecraft.world.entity.animal.parrot.Parrot
+import net.minecraft.world.entity.animal.pig.Pig
+import net.minecraft.world.entity.animal.pig.PigVariants
 import net.minecraft.world.entity.animal.rabbit.Rabbit
 import net.minecraft.world.entity.animal.sheep.Sheep
+import net.minecraft.world.entity.animal.wolf.Wolf
+import net.minecraft.world.entity.animal.wolf.WolfVariants
+import net.minecraft.world.entity.monster.Shulker
+import net.minecraft.world.entity.monster.Slime
+import net.minecraft.world.entity.monster.zombie.ZombieVillager
+import net.minecraft.world.entity.npc.villager.VillagerType
+import net.minecraft.world.entity.variant.VariantUtils
 import net.minecraft.world.item.DyeColor
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
 import net.minecraft.world.level.biome.Biome
 import net.minecraft.world.level.levelgen.Heightmap
+import java.util.Optional
 import kotlin.math.*
 import kotlin.random.Random
 import net.minecraft.world.entity.animal.equine.Variant as HorseVariant
@@ -317,10 +343,13 @@ internal fun AutoCapture.spawnSingleMob(
 	entity.addTag(MOB_TAG)
 	entity.setGlowingTag(true)
 
-	if (cfg.babyAndVariants) {
-		if (Random.nextBoolean()) (entity as? AgeableMob)?.isBaby = true
-		applyRandomVariant(entity)
-	}
+	if (cfg.babies && Random.nextBoolean()) (entity as? AgeableMob)?.isBaby = true
+
+	// finalizeSpawn() above already rolled a biome/random appearance for many mobs. When variants
+	// are on we override it with our own random roll; when off we force the canonical default so
+	// the mob never silently inherits a biome look from the relocation position.
+	if (cfg.variants) applyRandomVariant(entity)
+	else resetSpawnVariantToDefault(entity)
 
 	if (cfg.equipmentAndPoses && entity is Mob) {
 		val armorItems = listOf(
@@ -343,27 +372,135 @@ internal fun AutoCapture.spawnSingleMob(
 	sLevel.addFreshEntity(entity)
 }
 
+/** Shared RNG for registry-backed variant rolls (net.minecraft RandomSource, not kotlin.random). */
+private val VARIANT_RNG = RandomSource.create()
+
+/** The 7 biome villager skins (zombie villager inherits them). */
+private val VILLAGER_TYPES = listOf(
+	VillagerType.PLAINS, VillagerType.DESERT, VillagerType.JUNGLE,
+	VillagerType.SAVANNA, VillagerType.SNOW, VillagerType.SWAMP, VillagerType.TAIGA,
+)
+
+/**
+ * Rolls a random appearance for every mob that has more than one look. Runs only when `variants`
+ * is enabled. Each branch overrides whatever [Mob.finalizeSpawn] already picked. See VARIANTS.md
+ * for the full per-mob table.
+ */
 private fun applyRandomVariant(entity: Entity) {
 	when (entity) {
-		is Sheep -> entity.setColor(DyeColor.entries.random())
-		is Horse -> setVariantReflect(entity, HorseVariant.entries.random())
+		// Dye-color appearance.
+		is Sheep -> entity.color = DyeColor.entries.random()
+		is Shulker -> setVariantReflect(entity, Optional.of(DyeColor.entries.random()))
+		// Enum / data variants (setVariant is private on most of these -> reflection).
+		is Horse -> setVariantAndMarkingsReflect(entity, HorseVariant.entries.random(), Markings.entries.random())
+		is Llama -> setVariantReflect(entity, Llama.Variant.entries.random()) // also covers TraderLlama
 		is Rabbit -> setVariantReflect(entity, Rabbit.Variant.entries.filter { it != Rabbit.Variant.EVIL }.random())
 		is Parrot -> setVariantReflect(entity, Parrot.Variant.entries.random())
 		is Axolotl -> setVariantReflect(entity, Axolotl.Variant.entries.random())
 		is Fox -> setVariantReflect(entity, Fox.Variant.entries.random())
+		is Salmon -> setVariantReflect(entity, Salmon.Variant.entries.random()) // small/medium/large = size
 		is TropicalFish -> setPackedVariantReflect(entity, TropicalFish.COMMON_VARIANTS.random().packedId)
 		is MushroomCow -> setVariantReflect(
 			entity,
 			MushroomCow.Variant.entries.filter { it != MushroomCow.Variant.DEFAULT }.random()
 		)
+		// Size-driven looks (changes the bounding box, so the YOLO box follows).
+		is Pufferfish -> entity.setPuffState(Random.nextInt(0, 3)) // 0=small, 1=mid, 2=full
+		is Slime -> entity.setSize(Random.nextInt(1, 5), true) // also covers MagmaCube; 1..4
+		// Panda gene pair: set both genes to the same value so even recessive looks are expressed.
+		is Panda -> Panda.Gene.entries.random().let { entity.setMainGene(it); entity.setHiddenGene(it) }
+		// Boolean trait.
+		is Goat -> entity.isScreamingGoat = Random.nextBoolean()
+		// Registry biome variants (warm/cold/temperate, cat breeds, wolf coats, frog colors).
+		is Cow -> rollRegistryVariant(entity, Registries.COW_VARIANT)
+		is Chicken -> rollRegistryVariant(entity, Registries.CHICKEN_VARIANT)
+		is Pig -> rollRegistryVariant(entity, Registries.PIG_VARIANT)
+		is Cat -> rollRegistryVariant(entity, Registries.CAT_VARIANT)
+		is Wolf -> rollRegistryVariant(entity, Registries.WOLF_VARIANT)
+		is Frog -> rollRegistryVariant(entity, Registries.FROG_VARIANT)
+		// Villager biome skin + profession (zombie villager only; plain villager is not captured).
+		is ZombieVillager -> randomizeVillager(entity)
 	}
 }
 
+/**
+ * Forces the canonical default appearance for every mob whose [Mob.finalizeSpawn] randomizes its
+ * look. Runs when `variants` is disabled so the dataset is reproducible and a mob never silently
+ * inherits a biome look from the relocation position. See VARIANTS.md for the per-mob defaults.
+ */
+private fun resetSpawnVariantToDefault(entity: Entity) {
+	when (entity) {
+		is Sheep -> entity.color = DyeColor.WHITE
+		is Horse -> setVariantAndMarkingsReflect(entity, HorseVariant.WHITE, Markings.NONE)
+		is Llama -> setVariantReflect(entity, Llama.Variant.DEFAULT)
+		is Rabbit -> setVariantReflect(entity, Rabbit.Variant.DEFAULT)
+		is Parrot -> setVariantReflect(entity, Parrot.Variant.DEFAULT)
+		is Axolotl -> setVariantReflect(entity, Axolotl.Variant.DEFAULT)
+		is Fox -> setVariantReflect(entity, Fox.Variant.DEFAULT)
+		is Salmon -> setVariantReflect(entity, Salmon.Variant.DEFAULT)
+		is TropicalFish -> setPackedVariantReflect(entity, TropicalFish.DEFAULT_VARIANT.packedId)
+		is MushroomCow -> setVariantReflect(entity, MushroomCow.Variant.DEFAULT)
+		is Slime -> entity.setSize(2, true)
+		is Panda -> { entity.setMainGene(Panda.Gene.NORMAL); entity.setHiddenGene(Panda.Gene.NORMAL) }
+		is Goat -> entity.isScreamingGoat = false
+		is Cow -> resetRegistryVariant(entity, CowVariants.DEFAULT)
+		is Chicken -> resetRegistryVariant(entity, ChickenVariants.DEFAULT)
+		is Pig -> resetRegistryVariant(entity, PigVariants.DEFAULT)
+		is Cat -> resetRegistryVariant(entity, CatVariants.BLACK)
+		is Wolf -> resetRegistryVariant(entity, WolfVariants.DEFAULT)
+		is Frog -> resetRegistryVariant(entity, FrogVariants.TEMPERATE)
+		is ZombieVillager -> entity.villagerData = entity.villagerData.withType(entity.registryAccess(), VillagerType.PLAINS)
+	}
+}
+
+/** Rolls a random registry-backed variant (cat/wolf/frog/cow/pig/chicken). */
+private fun <T : Any> rollRegistryVariant(entity: Entity, registryKey: ResourceKey<out Registry<T>>) {
+	entity.registryAccess().lookupOrThrow(registryKey).getRandom(VARIANT_RNG).ifPresent { setVariantReflect(entity, it) }
+}
+
+/** Resets a registry-backed variant to its declared default. */
+private fun <T : Any> resetRegistryVariant(entity: Entity, defaultKey: ResourceKey<T>) {
+	setVariantReflect(entity, VariantUtils.getDefaultOrAny(entity.registryAccess(), defaultKey))
+}
+
+/** Randomizes a zombie villager's biome skin and profession (both change its texture). */
+private fun randomizeVillager(zv: ZombieVillager) {
+	val registries = zv.registryAccess()
+	var data = zv.villagerData.withType(registries, VILLAGER_TYPES.random())
+	registries.lookupOrThrow(Registries.VILLAGER_PROFESSION).getRandom(VARIANT_RNG)
+		.ifPresent { data = data.withProfession(it) }
+	zv.villagerData = data
+}
+
+/** Sets a private/public single-arg `setVariant(x)`, walking the class hierarchy (e.g. TraderLlama). */
 private fun setVariantReflect(entity: Any, variant: Any) {
 	runCatching {
-		val method = entity.javaClass.declaredMethods.first { it.name == "setVariant" && it.parameterCount == 1 }
-		method.isAccessible = true
-		method.invoke(entity, variant)
+		var cls: Class<*>? = entity.javaClass
+		while (cls != null) {
+			val method = cls.declaredMethods.firstOrNull { it.name == "setVariant" && it.parameterCount == 1 }
+			if (method != null) {
+				method.isAccessible = true
+				method.invoke(entity, variant)
+				return
+			}
+			cls = cls.superclass
+		}
+	}
+}
+
+/** Sets a private `setVariantAndMarkings(variant, markings)` (horse coat + markings). */
+private fun setVariantAndMarkingsReflect(entity: Any, variant: Any, markings: Any) {
+	runCatching {
+		var cls: Class<*>? = entity.javaClass
+		while (cls != null) {
+			val method = cls.declaredMethods.firstOrNull { it.name == "setVariantAndMarkings" && it.parameterCount == 2 }
+			if (method != null) {
+				method.isAccessible = true
+				method.invoke(entity, variant, markings)
+				return
+			}
+			cls = cls.superclass
+		}
 	}
 }
 

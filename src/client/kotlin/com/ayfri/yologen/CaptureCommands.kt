@@ -72,7 +72,7 @@ private fun reloadConfig(mc: Minecraft) {
 	mc.player?.sendSystemMessage(
 		Component.literal(
 			"§a[YoloGen] §fConfig reloaded. §8shots/mob=§f${cfg.shotsPerMob} §8renderDist=§f${cfg.captureRenderDistance} " +
-				"§8baby=§f${cfg.babyAndVariants} §8equip=§f${cfg.equipmentAndPoses} " +
+				"§8babies=§f${cfg.babies} §8variants=§f${cfg.variants} §8equip=§f${cfg.equipmentAndPoses} " +
 				"§8multiMob=§f${cfg.multipleMobsPerFrame} §8jitter=§f${cfg.cameraJitterAndLighting}"
 		)
 	)

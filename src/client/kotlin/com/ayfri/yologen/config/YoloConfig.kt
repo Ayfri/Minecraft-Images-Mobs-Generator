@@ -39,8 +39,10 @@ data class YoloConfig(
 	/** JPEG quality 0.0–1.0 (only used when imageFormat = "jpg"). */
 	val jpegQuality: Float = 0.90f,
 
-	/** Capture baby variants and mob color/type variants where available. */
-	val babyAndVariants: Boolean = false,
+	/** Randomly make ~50% of ageable mobs babies. */
+	val babies: Boolean = false,
+	/** Roll a random color/type/size/biome variant per mob where available (see VARIANTS.md). */
+	val variants: Boolean = false,
 	/** Equip random armor / held items on mobs. */
 	val equipmentAndPoses: Boolean = false,
 	/** Spawn multiple mobs simultaneously per frame (uses AABB boxes). */
