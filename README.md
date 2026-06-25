@@ -105,7 +105,7 @@ restored when the bot stops.
 
 ## Requirements
 
-- Java 25 (`C:\Users\pierr\.jdks\openjdk-25.0.1` - set `JAVA_HOME` before running Gradle)
+- Java 25 (set `JAVA_HOME` before running Gradle)
 - Minecraft 26.1.2
 - Fabric Loader 0.19.3+
 - Fabric API 0.150.0+26.1.2
@@ -116,7 +116,6 @@ restored when the bot stops.
 ## Build
 
 ```powershell
-$env:JAVA_HOME = "C:\Users\pierr\.jdks\openjdk-25.0.1"
 ./gradlew build
 ```
 
